@@ -1,10 +1,10 @@
 # dbweb
 
-Local-first web admin cho nhiều loại database (MySQL, Postgres, Oracle, MSSQL, MongoDB, Redis), inspired bởi Robo3T / phpMyAdmin nhưng đa-DBMS, chạy duy nhất trên `127.0.0.1`.
+Local-first web admin for multiple database engines (MySQL, Postgres, Oracle, MSSQL, MongoDB, Redis), inspired by Robo3T / phpMyAdmin but cross-DBMS, bound exclusively to `127.0.0.1`.
 
 ![architecture](https://img.shields.io/badge/stack-Node.js%2022%20LTS-339933) ![architecture](https://img.shields.io/badge/frontend-React%20%2B%20Vite-61DAFB) ![architecture](https://img.shields.io/badge/backend-Fastify%205-000000)
 
-## Cấu trúc
+## Project layout
 
 ```
 apps/
@@ -13,14 +13,14 @@ apps/
       config.ts            host/port/data-dir env config
       store/sqlite.ts      better-sqlite3, migrations
       store/secrets.ts     AES-256-GCM master-key vault
-      store/connections.ts CRUD connection configs
+      store/connections.ts connection-config CRUD
       store/history.ts     query history
       store/saved.ts       saved queries
-      services/adapter-pool.ts  per-connection adapter cache (5min idle reap)
+      services/adapter-pool.ts  per-connection adapter cache (5-min idle reap)
       routes/connections.ts  CRUD endpoints
-      routes/db.ts          execute / browse / stats / row-edit / saved
-      routes/portability.ts encrypted bundle export/import
-      index.ts              bootstrap
+      routes/db.ts           execute / browse / stats / row-edit / saved
+      routes/portability.ts  encrypted bundle export/import
+      index.ts               bootstrap
 
   web/                     Vite + React SPA
     src/
@@ -37,125 +37,155 @@ apps/
       lib/export.ts          CSV / JSON download
 
 packages/
-  shared-types/            DTOs dùng chung server↔web
-  adapters/                Adapter interface + driver wrappers
+  shared-types/            DTOs shared between server and web
+  adapters/                Adapter contract + driver wrappers
     src/
       types.ts             DbAdapter contract
       registry.ts          factory map by DbKind
       mysql.ts             mysql2
       postgres.ts          pg
-      oracle.ts            oracledb (thin mode mặc định)
+      oracle.ts            oracledb (thin mode by default)
       mssql.ts             tedious
       mongodb.ts           mongodb@3.7 (legacy server compat)
       mongodb-shell.ts     vm-sandboxed shell evaluator
       redis.ts             ioredis
 types/
-  oracledb.d.ts            type shim cho oracledb (chưa ship types)
+  oracledb.d.ts            type shim for oracledb (driver ships none)
 ```
 
-## Yêu cầu
+## Requirements
 
-- **Node.js 20 hoặc 22 LTS** — tránh Node 21 (`better-sqlite3` / `keytar` không có prebuild cho odd-version)
+- **Node.js 20 or 22 LTS** — avoid Node 21 (no prebuilds for `better-sqlite3` / `keytar` on odd-numbered Node releases)
 - pnpm >= 10
-- macOS hoặc Linux (Windows chưa test)
+- macOS or Linux (Windows untested)
 
-## Chạy
+## Run
 
 ```bash
-nvm use 22       # nếu dùng nvm
+nvm use 22       # if you use nvm
 pnpm install
-pnpm dev          # song song server (4317) + web (4318)
-# hoặc:
+pnpm dev          # runs server (4317) + web (4318) in parallel
+# or:
 pnpm -w run dev:server
 pnpm -w run dev:web
 ```
 
-Mở [http://127.0.0.1:4318](http://127.0.0.1:4318).
+Open [http://127.0.0.1:4318](http://127.0.0.1:4318).
 
-Build production:
+Production build:
+
 ```bash
 pnpm build
-pnpm --filter @dbweb/server start    # cần node dist/index.js
+pnpm --filter @dbweb/server start    # serves the built server (node dist/index.js)
 ```
 
-## Lưu trữ dữ liệu
+## Where data lives
 
-Tất cả nằm trong `~/.dbweb/` (override bằng `DBWEB_DATA_DIR`):
+Everything sits under `~/.dbweb/` (override with `DBWEB_DATA_DIR`):
 
-| Path | Nội dung |
+| Path | Contents |
 |---|---|
-| `dbweb.sqlite` | Connection configs (password mã hoá), query history, saved queries |
-| `dbweb.sqlite-wal`, `-shm` | SQLite WAL journal (tự sinh) |
-| `vault.key` | Master AES key (chỉ tồn tại khi `DBWEB_FILE_VAULT=1`) |
+| `dbweb.sqlite` | Connection configs (passwords encrypted), query history, saved queries |
+| `dbweb.sqlite-wal`, `-shm` | SQLite WAL journal (auto-managed) |
+| `vault.key` | Master AES key — only present when `DBWEB_FILE_VAULT=1` |
 
-**Master encryption key** mặc định ở **macOS Keychain** (service `dbweb`, account `master-key`) qua `keytar`. Trên Linux headless hoặc khi muốn portable, set `DBWEB_FILE_VAULT=1` → key lưu vào `~/.dbweb/vault.key` chmod 600.
+The **master encryption key** lives in the **macOS Keychain** by default (service `dbweb`, account `master-key`) via `keytar`. On headless Linux or for a portable setup, set `DBWEB_FILE_VAULT=1` and the key is written to `~/.dbweb/vault.key` with mode 0600.
 
-**UI preferences** lưu ở browser `localStorage`:
-- `dbweb:sidebarCollapsed` — connections sidebar collapsed (rail mode)
-- `dbweb:treeCollapsed` — db-tree collapsed trong workbench
-- `dbweb:editorHeight` — chiều cao editor pane (px)
+**UI preferences** are stored in the browser's `localStorage`:
+- `dbweb:sidebarCollapsed` — connections sidebar in rail mode
+- `dbweb:treeCollapsed` — workbench db-tree collapsed
+- `dbweb:editorHeight` — editor pane height (px)
 - `dbweb:resultView` — `table` | `json`
 
 ### Backup & migrate
 
-- **Cách an toàn**: dùng tính năng **Export** trong UI (sidebar `⇅`) → tạo file `.dbweb` mã hoá bằng passphrase. Mang sang máy mới, **Import** với cùng passphrase.
-- **Cách thủ công**: copy cả `~/.dbweb/` SANG kèm theo Keychain entry (qua `Keychain Access → dbweb → master-key`). Nếu chỉ copy SQLite mà mất master key, password không decrypt được — connection vẫn hiện nhưng `Test` sẽ fail auth.
+- **Recommended**: use the **Export** action in the UI (sidebar `⇅`). It produces a `.dbweb` file encrypted with a passphrase. On the destination machine, **Import** the file using the same passphrase.
+- **Manual**: copy the entire `~/.dbweb/` directory **together with** the matching Keychain entry (`Keychain Access → dbweb → master-key`). Copying only the SQLite file without the master key leaves passwords undecryptable — connections will appear in the UI but `Test` will fail authentication.
 
-## Biến môi trường
+## Environment variables
 
-| Biến | Mặc định | Mô tả |
+| Variable | Default | Description |
 |---|---|---|
-| `DBWEB_HOST` | `127.0.0.1` | Bind address. **Luôn giữ `127.0.0.1`** trừ khi cố ý mở mạng nội bộ |
-| `DBWEB_PORT` | `4317` | API server port (web dev port là 4318) |
-| `DBWEB_DATA_DIR` | `~/.dbweb` | Nơi chứa SQLite + vault |
-| `DBWEB_FILE_VAULT` | unset | Đặt `1` để dùng file vault thay cho OS Keychain |
+| `DBWEB_HOST` | `127.0.0.1` | Bind address. **Keep `127.0.0.1`** unless you intentionally want LAN access |
+| `DBWEB_PORT` | `4317` | API server port (web dev port is 4318) |
+| `DBWEB_DATA_DIR` | `~/.dbweb` | Where SQLite + vault are stored |
+| `DBWEB_FILE_VAULT` | unset | Set to `1` to use a file-based vault instead of the OS Keychain |
 
-## Tính năng
+## Features
 
-### Database hỗ trợ
+### Supported databases
+
 | Kind | Driver | Default port | Versions tested | CRUD UI | Inline edit |
 |---|---|---|---|---|---|
 | MySQL | `mysql2` | 3306 | 5.7+ / 8.x | ✓ | ✓ (by PK) |
 | PostgreSQL | `pg` | 5432 | 12+ | ✓ | ✓ (by PK) |
 | Oracle | `oracledb` thin | 1521 | 12c+ (thin mode) | ✓ | — |
 | MSSQL | `tedious` | 1433 | 2017+ | ✓ | — |
-| MongoDB | `mongodb@3.7` | 27017 | **3.4 → 4.2** (wire v0–9) | ✓ | ✓ (replace doc) |
+| MongoDB | `mongodb@3.7` + `mongodb@6` | 27017 | **2.6 → 8.x** (auto-fallback) | ✓ | ✓ (replace doc) |
 | Redis | `ioredis` | 6379 | 4+ | ✓ | — |
 
 ### Workbench
-- **Editor**: Monaco với syntax highlight tự đổi theo kind (SQL / JSON / shell). `Cmd/Ctrl + Enter` để run (hoạt động cả khi focus ở trong editor — wired qua `editor.addCommand`).
-- **Result toggle**: Table view (mặc định) hoặc JSON view (Monaco read-only, fold/unfold).
-- **Resizable**: kéo divider giữa editor và result để chỉnh tỉ lệ. Lưu vào localStorage.
-- **Browse tab** (SQL): viewer của bảng với filter builder per-column (= != > < >= <= LIKE IS NULL), pagination, inline edit từng cell theo PK, save per-row.
-- **Stats tab**: cards (size, table count, query count, avg latency), bar chart 14 ngày, top 5 slow queries, top 10 largest tables.
-- **History tab**: 2 section — Saved queries (đặt tên, click load) và History (toàn bộ statement đã chạy, có status ✓/✕, elapsed, row count, time).
-- **Export**: kết quả query → CSV (RFC4180) hoặc JSON download.
 
-### Tree view (Robo3T-style)
+- **Editor**: Monaco with kind-aware syntax highlighting (SQL / JSON / shell). `Cmd/Ctrl + Enter` runs the query — works even when the editor is focused, because the binding is registered through `editor.addCommand`.
+- **Result toggle**: Table view (default) or JSON view (Monaco read-only with fold/unfold).
+- **Resizable**: drag the divider between editor and result to adjust the split. Persisted to localStorage.
+- **Browse tab** (SQL): table viewer with per-column filter builder (`= != > < >= <= LIKE IS NULL`), pagination, in-place cell editing keyed by primary key, save per row.
+- **Stats tab**: cards (size, table count, query count, average latency), 14-day query histogram, top 5 slowest queries, top 10 largest tables.
+- **History tab**: two sections — Saved queries (named, click to load) and History (every executed statement with status ✓/✕, elapsed time, row count, timestamp).
+- **Export**: query result → CSV (RFC 4180-compliant) or JSON download.
+
+### Robo3T-style tree view
+
 ```
 ▾ host:port (N)                 ← right-click: Server Status, Host Info, Version, Refresh
   ▾ <database>
     ▾ <collection / table>      ← right-click: View / Insert / Update / Remove / Drop / Indexes / Stats
-      │ Indexes                 ← click → tự chạy db.coll.getIndexes()
-      │ Stats                   ← click → tự chạy db.coll.stats()
-    │ DB Stats                  ← click → tự chạy db.stats()
+      │ Indexes                 ← click → runs db.coll.getIndexes()
+      │ Stats                   ← click → runs db.coll.stats()
+    │ DB Stats                  ← click → runs db.stats()
 ```
 
-### MongoDB shell syntax đầy đủ
-Native MongoDB shell expressions chạy thẳng trong editor:
+### MongoDB — multi-version support
+
+dbweb ships **two MongoDB drivers side-by-side** because no single line covers every server in the wild:
+
+| Driver | Wire versions | Server range |
+|---|---|---|
+| `mongodb@6.x` (modern) | v8+ | MongoDB **4.2 → 8.x** |
+| `mongodb@3.7` (legacy) | v0–9 | MongoDB **2.6 → 4.2** |
+
+The adapter picks one automatically at connect time:
+
+1. **Try modern first.** If the server speaks wire v8+, use it — fastest path, supports the latest features.
+2. **Fall back on wire mismatch.** If the modern driver rejects with `Server reports maximum wire version N, but this version of the Node.js Driver requires at least 8`, the dispatcher silently retries with the legacy driver.
+3. **Other errors propagate as-is** — auth failures, DNS, network timeouts surface verbatim so the user sees a useful message.
+
+Force a specific driver via connection options if needed:
+
+```json
+{ "options": { "driver": "modern" } }   // skip fallback, fail fast on legacy servers
+{ "options": { "driver": "legacy" } }   // skip modern probe, useful for old prod fleets
+{ "options": { "driver": "auto" } }     // default
+```
+
+The shell evaluator routes server commands through `db.command(...)` (e.g. `db.stats()` → `db.command({ dbStats: 1 })`) so the same expression behaves identically on both lines, even where the modern driver dropped the sugar method.
+
+### Full MongoDB shell syntax
+
+Native MongoDB shell expressions run directly in the editor:
 
 ```js
-db.quote.find({status: "Hoạt động"}).sort({_id: -1}).limit(10)
-db.quote.findOne({_id: ObjectId("5cd95a06710bed2e066cee83")})
+db.quote.find({ status: "active" }).sort({ _id: -1 }).limit(10)
+db.quote.findOne({ _id: ObjectId("5cd95a06710bed2e066cee83") })
 db.quote.countDocuments({})
 db.quote.distinct("status")
-db.quote.aggregate([{$group: {_id: "$status", n: {$sum: 1}}}])
+db.quote.aggregate([{ $group: { _id: "$status", n: { $sum: 1 } } }])
 
-db.quote.insertOne({text: "...", status: "draft"})
-db.quote.updateMany({status: null}, {$set: {status: "draft"}})
-db.quote.deleteOne({_id: ObjectId("...")})
+db.quote.insertOne({ text: "...", status: "draft" })
+db.quote.updateMany({ status: null }, { $set: { status: "draft" } })
+db.quote.deleteOne({ _id: ObjectId("...") })
 
-db.quote.createIndex({slug: 1}, {unique: true})
+db.quote.createIndex({ slug: 1 }, { unique: true })
 db.quote.getIndexes()
 db.quote.dropIndex("slug_1")
 db.quote.stats()
@@ -164,50 +194,52 @@ db.stats()
 db.serverStatus()
 db.hostInfo()
 db.version()
-db.runCommand({listDatabases: 1})
+db.runCommand({ listDatabases: 1 })
 ```
 
-Helpers tự nhận: `ObjectId(...)`, `ISODate(...)`, `Date`, `NumberLong`, `NumberInt`. Cursor methods `.sort()` `.limit()` `.skip()` `.project()` chainable. Default `.limit(50)` áp dụng nếu user không gọi limit.
+Helpers automatically available: `ObjectId(...)`, `ISODate(...)`, `Date`, `NumberLong`, `NumberInt`. Cursor methods `.sort()` / `.limit()` / `.skip()` / `.project()` chain naturally. A default `.limit(50)` is injected when the user doesn't set one explicitly.
 
-Block list (an toàn): `flushall`, `flushdb`, `shutdown`, `config`, `debug`.
+Blocked commands (safety): `flushall`, `flushdb`, `shutdown`, `config`, `debug`.
 
-### Export / Import portability
-- **Connection bundle**: file `.dbweb` định dạng `DBWEB1:salt:iv:tag:ciphertext`, AES-256-GCM với key derive bằng scrypt từ passphrase (≥8 chars). Sai passphrase → `DECRYPT_FAILED` (GCM auth tag bảo vệ).
-- **Query result**: CSV / JSON download trực tiếp từ result toolbar.
+### Portability — export / import
 
-### Bảo mật
-- Bind 127.0.0.1 mặc định — không lộ ra LAN.
-- Mật khẩu DB: AES-256-GCM at rest, master key tách rời (Keychain hoặc vault file 0600).
-- Server không bao giờ trả password ra response (chỉ adapter-pool đọc nội bộ).
-- SQLite WAL mode bật để tránh corruption.
-- vm sandbox cho Mongo shell (timeout 30s).
+- **Connection bundle**: `.dbweb` file in the `DBWEB1:salt:iv:tag:ciphertext` format. AES-256-GCM with a key derived from the passphrase (≥8 chars) via scrypt + 16-byte salt. Wrong passphrase → `DECRYPT_FAILED` (GCM auth tag protects against silent corruption).
+- **Query result**: CSV or JSON download straight from the result toolbar.
 
-## Phím tắt & UI
+### Security
 
-| Action | Phím / Click |
+- Bound to 127.0.0.1 by default — never exposed on LAN unless explicitly reconfigured.
+- DB passwords: AES-256-GCM at rest, master key kept separate (Keychain or file vault, mode 0600).
+- The server never returns a stored password in any response — it's read internally by the adapter pool only.
+- SQLite WAL mode enabled to avoid corruption on concurrent reads/writes.
+- MongoDB shell evaluation runs in a `vm` sandbox with a 30-second timeout.
+
+## Keyboard shortcuts & UI
+
+| Action | Shortcut / Click |
 |---|---|
 | Run query | `⌘ Enter` (mac) / `Ctrl + Enter` (Win/Linux) |
-| New connection | `+` ở sidebar |
+| New connection | `+` in the sidebar |
 | Edit connection | `✎` per-connection |
 | Delete connection | `×` per-connection |
-| Export / Import | `⇅` ở sidebar |
-| Collapse connections sidebar | `‹` ở header |
-| Collapse db-tree | `‹` ở header tree trong workbench |
-| Toggle Table / JSON view | Segmented control trong editor toolbar |
-| Save current query | `☆ Save` button (ask cho name) |
+| Export / Import | `⇅` in the sidebar |
+| Collapse connections sidebar | `‹` in the sidebar header |
+| Collapse db-tree | `‹` in the workbench tree header |
+| Toggle Table / JSON view | Segmented control in the editor toolbar |
+| Save current query | `☆ Save` button (prompts for a name) |
 | Right-click host | Server Status / Host Info / Version / Refresh |
-| Right-click table/collection | View / Insert / Update / Remove / Drop / Indexes / Stats |
-| Drag pane divider | Resize editor vs result |
+| Right-click table or collection | View / Insert / Update / Remove / Drop / Indexes / Stats |
+| Drag the pane divider | Resize editor vs result |
 
-## Roadmap chưa làm
+## Roadmap
 
-- [ ] Inline `updateRow` cho Oracle / MSSQL (cần map bind-types — hiện trả `NOT_SUPPORTED 501`)
-- [ ] Postgres multi-database browse (hiện browse trong DB cấu hình; `database` param hiểu là schema)
-- [ ] AbortSignal cancel cho long-running query
-- [ ] JSON tree view kiểu Robo3T (hierarchical key/value/type) — hiện chỉ có pretty JSON
-- [ ] Tab queries song song (mỗi query 1 tab editor riêng)
-- [ ] Tauri build → desktop binary
+- [ ] Inline `updateRow` for Oracle / MSSQL — needs proper bind-type mapping (currently returns `NOT_SUPPORTED 501`)
+- [ ] PostgreSQL multi-database browse — today the configured database is used and the `database` param is treated as a schema
+- [ ] `AbortSignal` cancellation for long-running queries
+- [ ] Robo3T-style hierarchical JSON tree (key / value / type columns) — currently only pretty-printed JSON
+- [ ] Multiple parallel query tabs
+- [ ] Tauri build for a packaged desktop binary
 
 ## License
 
-Proprietary / Internal use.
+Proprietary / internal use.

@@ -15,6 +15,7 @@
     "@dbweb/shared-types": "workspace:*",
     "ioredis": "^5.4.2",
     "mongodb": "^3.7.4",
+    "mongodb-modern": "npm:mongodb@^6.12.0",
     "mysql2": "^3.11.5",
     "oracledb": "^6.7.0",
     "pg": "^8.13.1",

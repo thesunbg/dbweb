@@ -1,30 +1,31 @@
 import vm from "node:vm";
-import mongodbPkg from "mongodb";
-import type { Db, Collection } from "mongodb";
-
-const { ObjectId } = mongodbPkg;
 
 /**
- * Evaluate a mongo-shell-style expression against a connected Db and return
- * a plain value (array, document, number, ...). Cursors are auto-resolved
- * via toArray(); a default limit is injected when the user didn't set one,
- * so that `db.users.find()` doesn't dump millions of rows.
+ * Driver-agnostic MongoDB shell evaluator.
  *
- * Supported surface mirrors what Robo3T / mongosh users expect:
- *   db.coll.find/findOne/insert/update/delete/count/distinct/aggregate
- *   db.coll.createIndex/dropIndex/getIndexes/indexes/stats
- *   db.stats / db.getCollectionNames / db.runCommand
- *   ObjectId(...), ISODate(...), NumberLong/Int (no-op casts)
+ * Both `mongodb@3.7` (legacy, wire v0–9 → MongoDB 2.6 to 4.2) and
+ * `mongodb@6` (modern, wire v8+ → MongoDB 4.2+) expose enough common runtime
+ * surface that one evaluator can speak to either: `db.collection()`,
+ * `db.command()`, `coll.find()/aggregate()/insertOne()/...`, cursor `.sort/
+ * .limit/.skip/.project/.toArray`. The few differences that mattered
+ * (collection-level `.stats()` removed in v4, `.count()` removed in v4,
+ * `.save()` removed in v4) are handled by routing through `db.command()`
+ * which works identically in both lines.
+ *
+ * The caller passes in the driver package — that's the only piece that
+ * actually differs between modern and legacy. We use it to access
+ * `ObjectId` for the user's expressions.
  */
 export async function runMongoShell(
-  db: Db,
+  db: unknown,
   expression: string,
   defaultLimit: number,
+  driverPkg: { ObjectId: new (s?: string) => unknown },
 ): Promise<unknown> {
   const dbProxy = createDbProxy(db, defaultLimit);
   const ctx = vm.createContext({
     db: dbProxy,
-    ObjectId,
+    ObjectId: driverPkg.ObjectId,
     ISODate: (s?: string) => (s ? new Date(s) : new Date()),
     Date,
     NumberLong: (v: unknown) => Number(v),
@@ -43,20 +44,25 @@ export async function runMongoShell(
   }
   result = await result;
 
-  // If the user's expression ended at a cursor (e.g. `db.x.find().sort(...)`),
-  // resolve it now. Apply default limit only when they didn't specify one.
+  // Auto-resolve cursor at top level. The caller didn't write `.toArray()`
+  // so we resolve it here, applying default limit if they didn't ask.
   if (isCursorProxy(result)) {
-    const cp = result as CursorProxy;
-    if (!cp.__userLimited) cp.__cursor.limit(defaultLimit);
-    return cp.__cursor.toArray();
+    if (!result.__userLimited) result.__cursor.limit(defaultLimit);
+    return result.__cursor.toArray();
   }
   return result;
 }
 
 interface CursorProxy {
-  __cursor: { toArray(): Promise<unknown[]>; limit(n: number): unknown; sort(s: unknown): unknown; skip(n: number): unknown; project(p: unknown): unknown; count(): Promise<number> };
+  __cursor: {
+    toArray(): Promise<unknown[]>;
+    limit(n: number): unknown;
+    sort(s: unknown): unknown;
+    skip(n: number): unknown;
+    project(p: unknown): unknown;
+    count(): Promise<number>;
+  };
   __userLimited: boolean;
-  // chainables — forwarded
   sort(s: unknown): CursorProxy;
   limit(n: number): CursorProxy;
   skip(n: number): CursorProxy;
@@ -98,6 +104,10 @@ function wrapCursor(cursor: CursorProxy["__cursor"], userLimited = false): Curso
   return proxy;
 }
 
+/* eslint-disable @typescript-eslint/no-explicit-any */
+type Db = any;
+type Collection = any;
+
 function wrapCollection(coll: Collection, defaultLimit: number) {
   return {
     find: (q?: unknown, p?: unknown) =>
@@ -105,7 +115,7 @@ function wrapCollection(coll: Collection, defaultLimit: number) {
         coll.find(
           (q as Record<string, unknown>) ?? {},
           p ? ({ projection: p } as Record<string, unknown>) : undefined,
-        ) as unknown as CursorProxy["__cursor"],
+        ),
       ),
     findOne: (q?: unknown, p?: unknown) =>
       coll.findOne(
@@ -116,7 +126,6 @@ function wrapCollection(coll: Collection, defaultLimit: number) {
       Array.isArray(d) ? coll.insertMany(d as object[]) : coll.insertOne(d as object),
     insertOne: (d: unknown) => coll.insertOne(d as object),
     insertMany: (d: unknown) => coll.insertMany(d as object[]),
-    save: (d: unknown) => coll.save(d as object),
     update: (q: unknown, u: unknown, opts?: unknown) =>
       coll.updateMany(q as object, u as object, opts as object),
     updateOne: (q: unknown, u: unknown, opts?: unknown) =>
@@ -128,35 +137,38 @@ function wrapCollection(coll: Collection, defaultLimit: number) {
     remove: (q: unknown) => coll.deleteMany((q as object) ?? {}),
     deleteOne: (q: unknown) => coll.deleteOne((q as object) ?? {}),
     deleteMany: (q: unknown) => coll.deleteMany((q as object) ?? {}),
+    // .count() was deprecated in v3 and removed in v4. Always route to
+    // countDocuments so the same shell call works on every server version.
     count: (q?: unknown) => coll.countDocuments((q as object) ?? {}),
     countDocuments: (q?: unknown) => coll.countDocuments((q as object) ?? {}),
     distinct: (field: string, q?: unknown) => coll.distinct(field, (q as object) ?? {}),
     aggregate: (pipeline: unknown, opts?: unknown) =>
-      wrapCursor(
-        coll.aggregate(pipeline as object[], (opts as object) ?? {}) as unknown as CursorProxy["__cursor"],
-      ),
+      wrapCursor(coll.aggregate(pipeline as object[], (opts as object) ?? {})),
     createIndex: (spec: unknown, opts?: unknown) =>
       coll.createIndex(spec as Record<string, 1 | -1>, (opts as object) ?? {}),
     dropIndex: (name: unknown) => coll.dropIndex(name as string),
     getIndexes: () => coll.indexes(),
     indexes: () => coll.indexes(),
-    stats: () => coll.stats(),
     drop: () => coll.drop(),
     rename: (n: unknown) => coll.rename(n as string),
-    // unused by us but printed nicely if user inspects
     getName: () => coll.collectionName,
-    explain: () => ({ note: "explain() requires runCommand" }),
+    // .stats() exists on the collection in v3 but was removed in v4. Routing
+    // through db.command keeps the call portable.
+    stats: () => {
+      const dbRef = (coll as { s?: { db?: Db }; dbName?: string }).s?.db ?? coll.db;
+      const cmdHost: Db = dbRef ?? coll;
+      return cmdHost.command({ collStats: coll.collectionName });
+    },
   };
-  // Note on parameter defaults: defaultLimit is consumed at toArray time inside
-  // runMongoShell, not here. Kept as a parameter so future per-call overrides
-  // can flow through wrapCollection if needed.
   void defaultLimit;
 }
 
 function createDbProxy(db: Db, defaultLimit: number) {
   // Reserved db-level methods. Anything else is treated as a collection name.
+  // Stats / serverStatus / hostInfo are routed through db.command() because
+  // the corresponding sugar methods were removed in mongodb v4+.
   const reserved: Record<string, unknown> = {
-    stats: () => db.stats(),
+    stats: () => db.command({ dbStats: 1 }),
     getCollectionNames: async () => {
       const list = (await db.listCollections({}, { nameOnly: true }).toArray()) as { name: string }[];
       return list.map((c) => c.name);
@@ -178,8 +190,8 @@ function createDbProxy(db: Db, defaultLimit: number) {
     get(target, prop) {
       if (typeof prop === "symbol") return undefined;
       if (prop in target) return target[prop as string];
-      // Treat any other property access as a collection.
       return wrapCollection(db.collection(prop), defaultLimit);
     },
   });
 }
+/* eslint-enable @typescript-eslint/no-explicit-any */

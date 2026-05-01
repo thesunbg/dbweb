@@ -107,11 +107,14 @@ function stringify(doc: Record<string, unknown>): string {
   return JSON.stringify(
     doc,
     (_k, v) => {
-      // mongodb v3 ObjectId serializes to { _bsontype: 'ObjectID', id: Buffer }.
-      // We collapse it to its hex string form so users see what they expect.
-      if (v && typeof v === "object" && (v as { _bsontype?: string })._bsontype === "ObjectID") {
-        // toString comes from the BSON type at runtime
-        return (v as { toString(): string }).toString();
+      // mongodb v3 serializes ObjectId as { _bsontype: 'ObjectID' }; v5+ uses
+      // 'ObjectId' (lowercase d). We collapse either to its hex string form so
+      // users see the value they expect, regardless of which driver is active.
+      if (v && typeof v === "object") {
+        const bson = (v as { _bsontype?: string })._bsontype;
+        if (bson === "ObjectID" || bson === "ObjectId") {
+          return (v as { toString(): string }).toString();
+        }
       }
       return v;
     },

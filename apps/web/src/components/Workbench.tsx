@@ -512,9 +512,13 @@ function resultToJson(fields: string[], rows: unknown[][]): string {
 }
 
 function jsonReplacer(_k: string, v: unknown): unknown {
-  // Mongo v3 ObjectId: collapse to its hex string for human-readable output.
-  if (v && typeof v === "object" && (v as { _bsontype?: string })._bsontype === "ObjectID") {
-    return (v as { toString(): string }).toString();
+  // Mongo v3 stamps ObjectId with _bsontype='ObjectID'; v5+ uses 'ObjectId'
+  // (lowercase d). Collapse either form to its hex string for readability.
+  if (v && typeof v === "object") {
+    const bson = (v as { _bsontype?: string })._bsontype;
+    if (bson === "ObjectID" || bson === "ObjectId") {
+      return (v as { toString(): string }).toString();
+    }
   }
   return v;
 }
