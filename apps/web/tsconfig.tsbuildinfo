@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/components/connectionform.tsx","./src/components/dbtree.tsx","./src/components/documentmodal.tsx","./src/components/portabilitymodal.tsx","./src/components/stats.tsx","./src/components/tablebrowser.tsx","./src/components/workbench.tsx","./src/lib/export.ts"],"version":"5.9.3"}
