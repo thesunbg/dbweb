@@ -147,15 +147,38 @@ function quoteSqlTable(kind: DbKind, name: string): string {
   return schema ? `${w(schema)}.${w(table)}` : w(table);
 }
 
+/**
+ * Coerce a Mongo/BSON-flavored value to a plain string scalar before CSV/Excel
+ * serialization. Without this, ObjectId and Date go through JSON.stringify
+ * and gain literal `"..."` wrappers — which then collide with CSV's own
+ * quoting rules and produce `"""hex"""` triple-quoted cells.
+ */
+function toCellValue(v: unknown): string | number | boolean | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+    return v;
+  }
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === "object") {
+    const bson = (v as { _bsontype?: string })._bsontype;
+    if (bson === "ObjectID" || bson === "ObjectId") {
+      return (v as { toString(): string }).toString();
+    }
+    return JSON.stringify(v, jsonReplacer);
+  }
+  return String(v);
+}
+
 function csvEscape(v: unknown): string {
-  if (v === null || v === undefined) return "";
-  const s = typeof v === "object" ? JSON.stringify(v, jsonReplacer) : String(v);
+  const cell = toCellValue(v);
+  if (cell === null) return "";
+  const s = String(cell);
   if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
   return s;
 }
 
 function rowsToCsv(fields: string[], rows: unknown[][]): string {
-  const lines: string[] = [fields.map(csvEscape).join(",")];
+  const lines: string[] = [fields.map((f) => csvEscape(f)).join(",")];
   for (const r of rows) lines.push(r.map(csvEscape).join(","));
   return lines.join("\n");
 }
@@ -177,11 +200,11 @@ async function rowsToXlsx(
   sheet.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF0F0F0" } };
 
   for (const r of rows) {
-    const cells: Record<string, unknown> = {};
+    const cells: Record<string, string | number | boolean | null> = {};
     fields.forEach((f, i) => {
-      const v = r[i];
-      // Stringify nested objects / arrays — Excel cells are flat.
-      cells[f] = v !== null && typeof v === "object" ? JSON.stringify(v, jsonReplacer) : v;
+      // Same coercion as CSV — keeps ObjectId hex strings and Date ISO
+      // strings as scalar cells, JSON-encodes only plain nested objects.
+      cells[f] = toCellValue(r[i]);
     });
     sheet.addRow(cells);
   }
