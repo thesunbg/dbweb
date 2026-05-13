@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { getDb } from "./store/sqlite.js";
 import { connectionRoutes } from "./routes/connections.js";
 import { dbRoutes } from "./routes/db.js";
+import { exportRoutes } from "./routes/export.js";
 import { portabilityRoutes } from "./routes/portability.js";
 
 async function main() {
@@ -20,6 +21,7 @@ async function main() {
 
   await connectionRoutes(app);
   await dbRoutes(app);
+  await exportRoutes(app);
   await portabilityRoutes(app);
 
   // Eager-init SQLite so first request doesn't pay the migration cost.

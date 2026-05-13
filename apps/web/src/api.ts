@@ -37,6 +37,7 @@ export const api = {
   health: () => request<{ service: string; version: string; time: string }>("/api/health"),
 
   listConnections: () => request<ConnectionConfig[]>("/api/connections"),
+  activeConnections: () => request<{ ids: string[] }>("/api/connections/active"),
   createConnection: (input: ConnectionInput) =>
     request<ConnectionConfig>("/api/connections", {
       method: "POST",
@@ -52,6 +53,8 @@ export const api = {
 
   testConnection: (id: string) =>
     request<PingResult>(`/api/connections/${id}/test`, { method: "POST" }),
+  connectionUrl: (id: string) =>
+    request<{ url: string }>(`/api/connections/${id}/url`),
   listDatabases: (id: string) =>
     request<SchemaObjectDto[]>(`/api/connections/${id}/databases`),
   listObjects: (id: string, database: string) =>
@@ -112,6 +115,23 @@ export const api = {
       rowEstimates?: Record<string, number>;
       extras?: Record<string, unknown>;
     }>(`/api/connections/${id}/stats${qs}`);
+  },
+
+  /**
+   * Returns a download URL for a table export. The browser handles the actual
+   * download via `<a download>` so we don't have to buffer the response in JS
+   * memory (which would defeat the point for large dumps).
+   */
+  exportTableUrl: (
+    id: string,
+    database: string,
+    table: string,
+    format: "json" | "csv" | "xlsx",
+    limit?: number,
+  ) => {
+    const params = new URLSearchParams({ database, table, format });
+    if (limit) params.set("limit", String(limit));
+    return `/api/connections/${id}/export?${params.toString()}`;
   },
 
   exportConfigs: (passphrase: string) =>

@@ -17,7 +17,8 @@ interface Props {
 export type TreeAction =
   | { type: "browse"; database: string; table: string }
   | { type: "set-statement"; statement: string }
-  | { type: "run-statement"; statement: string };
+  | { type: "run-statement"; statement: string }
+  | { type: "export"; database: string; table: string; format: "json" | "csv" | "xlsx" };
 
 /**
  * Robo3T-style recursive tree:
@@ -274,6 +275,82 @@ function defaultActivate(
   return { type: "browse", database, table: name };
 }
 
+/**
+ * Quote a SQL table identifier per dialect. Critical for Postgres / Oracle
+ * which fold unquoted identifiers to lowercase — `SELECT * FROM AuditLog`
+ * silently becomes `auditlog` and fails when the actual table is mixed-case
+ * (very common with Prisma / TypeORM-managed schemas).
+ */
+function quoteSqlTable(kind: ConnectionConfig["kind"], name: string): string {
+  // Schema-qualified names come in as "schema.table" — split so each part
+  // gets its own quote pair instead of producing the invalid "schema.table".
+  const dot = name.indexOf(".");
+  const [schema, table] =
+    dot === -1 ? [null, name] : [name.slice(0, dot), name.slice(dot + 1)];
+
+  if (kind === "mssql") {
+    const wrap = (s: string) => `[${s.replace(/]/g, "]]")}]`;
+    return schema ? `${wrap(schema)}.${wrap(table)}` : wrap(table);
+  }
+  if (kind === "postgres" || kind === "oracle") {
+    const wrap = (s: string) => `"${s.replace(/"/g, '""')}"`;
+    return schema ? `${wrap(schema)}.${wrap(table)}` : wrap(table);
+  }
+  // mysql / mariadb
+  const wrap = (s: string) => `\`${s.replace(/`/g, "``")}\``;
+  return schema ? `${wrap(schema)}.${wrap(table)}` : wrap(table);
+}
+
+function buildSelectStatement(
+  kind: ConnectionConfig["kind"],
+  table: string,
+  limit: number,
+): string {
+  const t = quoteSqlTable(kind, table);
+  if (kind === "mssql") return `SELECT TOP ${limit} * FROM ${t}`;
+  if (kind === "oracle") return `SELECT * FROM ${t} FETCH FIRST ${limit} ROWS ONLY`;
+  return `SELECT * FROM ${t} LIMIT ${limit}`;
+}
+
+/**
+ * Per-dialect "describe table" query. Each engine has its own catalog —
+ * keeping this kind-aware avoids the user having to remember which one
+ * applies to which DB.
+ */
+function buildShowColumns(
+  kind: ConnectionConfig["kind"],
+  qualified: string,
+): string {
+  const dot = qualified.indexOf(".");
+  const [schema, table] =
+    dot === -1 ? [null, qualified] : [qualified.slice(0, dot), qualified.slice(dot + 1)];
+  const escTable = table.replace(/'/g, "''");
+  const escSchema = (schema ?? "public").replace(/'/g, "''");
+
+  if (kind === "mysql") {
+    return `SHOW COLUMNS FROM ${quoteSqlTable(kind, qualified)}`;
+  }
+  if (kind === "postgres") {
+    return `SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = '${escSchema}' AND table_name = '${escTable}'
+ORDER BY ordinal_position`;
+  }
+  if (kind === "mssql") {
+    return `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_NAME = '${escTable}'
+ORDER BY ORDINAL_POSITION`;
+  }
+  if (kind === "oracle") {
+    return `SELECT column_name, data_type, nullable, data_default
+FROM all_tab_columns
+WHERE owner = '${escSchema.toUpperCase()}' AND table_name = '${escTable.toUpperCase()}'
+ORDER BY column_id`;
+  }
+  return `SELECT * FROM ${quoteSqlTable(kind, qualified)} LIMIT 0`;
+}
+
 interface NodeRowProps {
   indent: number;
   expanded?: boolean;
@@ -489,6 +566,10 @@ function ContextMenu({ x, y, kind, collection, onPick, database }: ContextMenuPr
           { label: "Indexes", action: { type: "run-statement", statement: `db.${collection}.getIndexes()` } },
           { label: "Statistics", action: { type: "run-statement", statement: `db.${collection}.stats()` } },
           { sep: true, label: "", action: { type: "set-statement", statement: "" } },
+          { label: "Export → JSON", action: { type: "export", database, table: collection, format: "json" } },
+          { label: "Export → CSV", action: { type: "export", database, table: collection, format: "csv" } },
+          { label: "Export → Excel (.xlsx)", action: { type: "export", database, table: collection, format: "xlsx" } },
+          { sep: true, label: "", action: { type: "set-statement", statement: "" } },
           {
             label: "Rename Collection…",
             action: {
@@ -511,9 +592,35 @@ function ContextMenu({ x, y, kind, collection, onPick, database }: ContextMenuPr
             label: "Select 100",
             action: {
               type: "run-statement",
-              statement: `SELECT * FROM ${collection} LIMIT 100`,
+              statement: buildSelectStatement(kind, collection, 100),
             },
           },
+          {
+            label: "Insert quoted name",
+            action: {
+              type: "set-statement",
+              statement: quoteSqlTable(kind, collection),
+            },
+          },
+          { sep: true, label: "", action: { type: "set-statement", statement: "" } },
+          {
+            label: "Show columns",
+            action: {
+              type: "run-statement",
+              statement: buildShowColumns(kind, collection),
+            },
+          },
+          {
+            label: "Count rows",
+            action: {
+              type: "run-statement",
+              statement: `SELECT COUNT(*) FROM ${quoteSqlTable(kind, collection)}`,
+            },
+          },
+          { sep: true, label: "", action: { type: "set-statement", statement: "" } },
+          { label: "Export → JSON", action: { type: "export", database, table: collection, format: "json" } },
+          { label: "Export → CSV", action: { type: "export", database, table: collection, format: "csv" } },
+          { label: "Export → Excel (.xlsx)", action: { type: "export", database, table: collection, format: "xlsx" } },
         ];
 
   return (

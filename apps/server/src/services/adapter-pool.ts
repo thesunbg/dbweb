@@ -23,6 +23,14 @@ export async function getAdapter(connectionId: string): Promise<DbAdapter> {
   return adapter;
 }
 
+/** Returns IDs of every connection that has a live adapter in the cache.
+ *  Used by the UI to render a "connected" dot per connection without paying
+ *  for a fresh ping. */
+export function getActiveConnectionIds(): string[] {
+  reapIdle();
+  return [...cache.keys()];
+}
+
 export async function dropAdapter(connectionId: string): Promise<void> {
   const hit = cache.get(connectionId);
   if (!hit) return;

@@ -1,10 +1,22 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ConnectionConfig } from "@dbweb/shared-types";
+import type { ConnectionConfig, DbKind } from "@dbweb/shared-types";
 import { api } from "./api.js";
 import { ConnectionForm } from "./components/ConnectionForm.js";
 import { Workbench } from "./components/Workbench.js";
 import { PortabilityModal } from "./components/PortabilityModal.js";
+
+/** Two-letter glyph per DB kind — compact enough to fit in a 24px square
+ *  badge while staying unambiguous (single-letter "M" would clash between
+ *  MySQL and MongoDB). Color comes from the per-kind class in styles.css. */
+const KIND_GLYPH: Record<DbKind, string> = {
+  mysql: "My",
+  postgres: "Pg",
+  oracle: "Or",
+  mssql: "Ms",
+  mongodb: "Mo",
+  redis: "Rd",
+};
 
 export function App() {
   const qc = useQueryClient();
@@ -26,6 +38,15 @@ export function App() {
 
   const health = useQuery({ queryKey: ["health"], queryFn: api.health });
   const connections = useQuery({ queryKey: ["connections"], queryFn: api.listConnections });
+  // Poll the live-adapter set so each row's status dot stays accurate as
+  // adapters get reaped (5-min idle) or freshly opened.
+  const active = useQuery({
+    queryKey: ["active-connections"],
+    queryFn: api.activeConnections,
+    refetchInterval: 5_000,
+    staleTime: 0,
+  });
+  const activeSet = new Set(active.data?.ids ?? []);
 
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteConnection(id),
@@ -127,9 +148,47 @@ export function App() {
                 key={c.id}
                 className={`conn-item ${selectedId === c.id ? "active" : ""}`}
                 onClick={() => setSelectedId(c.id)}
+                title={`${c.kind} · ${c.host}:${c.port}`}
               >
-                <span className={`badge kind-${c.kind}`}>{c.kind}</span>
+                <span
+                  className={`conn-icon kind-${c.kind}`}
+                  title={c.kind}
+                  aria-label={c.kind}
+                >
+                  {KIND_GLYPH[c.kind]}
+                </span>
+                <span
+                  className={`conn-status ${activeSet.has(c.id) ? "live" : "idle"}`}
+                  title={activeSet.has(c.id) ? "connected" : "not connected"}
+                />
                 <span className="conn-name">{c.name}</span>
+                <button
+                  type="button"
+                  className="ghost icon"
+                  title="Copy URL"
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    // Capture the button BEFORE awaiting — React reuses the
+                    // synthetic event after async work completes, so
+                    // `e.currentTarget` would be null when we tried to
+                    // restore the label.
+                    const btn = e.currentTarget as HTMLButtonElement;
+                    const prev = btn.textContent ?? "⧉";
+                    try {
+                      const { url } = await api.connectionUrl(c.id);
+                      await navigator.clipboard.writeText(url);
+                      btn.textContent = "✓";
+                      setTimeout(() => {
+                        // Element may have unmounted — guard before touching.
+                        if (btn.isConnected) btn.textContent = prev;
+                      }, 1200);
+                    } catch (err) {
+                      alert(`Copy failed: ${(err as Error).message}`);
+                    }
+                  }}
+                >
+                  ⧉
+                </button>
                 <button
                   type="button"
                   className="ghost icon"

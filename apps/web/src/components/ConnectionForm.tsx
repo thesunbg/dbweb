@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ConnectionConfig, ConnectionInput, DbKind } from "@dbweb/shared-types";
 import { api } from "../api.js";
+import { buildConnectionUrl, parseConnectionUrl } from "../lib/connection-url.js";
 
 const DEFAULT_PORTS: Record<DbKind, number> = {
   mysql: 3306,
@@ -53,6 +54,37 @@ export function ConnectionForm({ editing, onClose }: Props) {
     },
   });
 
+  // Paste-URL state. Populated from the live form so editing fields keeps the
+  // preview in sync; pasting a new URL re-fills the form.
+  const [urlInput, setUrlInput] = useState<string>("");
+  const [urlError, setUrlError] = useState<string | null>(null);
+
+  const onPasteUrl = (raw: string) => {
+    setUrlInput(raw);
+    if (!raw.trim()) {
+      setUrlError(null);
+      return;
+    }
+    const parsed = parseConnectionUrl(raw);
+    if (!parsed) {
+      setUrlError("Unrecognised URL — check the scheme (postgres / mysql / mongodb / redis / mssql / oracle).");
+      return;
+    }
+    setUrlError(null);
+    setForm((f) => ({
+      // Keep the current name unless empty — users often type the friendly
+      // name first, then paste the URL.
+      name: f.name || `${parsed.kind}@${parsed.host}`,
+      kind: parsed.kind,
+      host: parsed.host,
+      port: parsed.port,
+      username: parsed.username ?? "",
+      password: parsed.password ?? "",
+      database: parsed.database ?? "",
+      options: parsed.options,
+    }));
+  };
+
   const setKind = (kind: DbKind) =>
     setForm((f) => ({ ...f, kind, port: DEFAULT_PORTS[kind] }));
 
@@ -78,6 +110,18 @@ export function ConnectionForm({ editing, onClose }: Props) {
             create.mutate(form);
           }}
         >
+          <label>
+            <span>Paste connection URL (optional)</span>
+            <textarea
+              rows={2}
+              value={urlInput}
+              onChange={(e) => onPasteUrl(e.target.value)}
+              placeholder="postgres://user:pass@host:5432/db   |   DATABASE_URL=mongodb://...   |   mysql://..."
+              spellCheck={false}
+            />
+            {urlError && <span className="error small">{urlError}</span>}
+          </label>
+
           <label>
             <span>Name</span>
             <input
@@ -146,6 +190,25 @@ export function ConnectionForm({ editing, onClose }: Props) {
               placeholder="leave blank to choose later"
             />
           </label>
+
+          {/* Reverse URL preview — what this connection looks like as an env var.
+              Helps double-check that the form mirrors the pasted URL. */}
+          {form.host && (
+            <div className="url-preview">
+              <span className="muted small">Equivalent URL</span>
+              <div className="row-tight">
+                <code className="url-code">{buildConnectionUrl(form)}</code>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => navigator.clipboard.writeText(buildConnectionUrl(form))}
+                  title="Copy to clipboard"
+                >
+                  ⧉
+                </button>
+              </div>
+            </div>
+          )}
 
           {create.isError && (
             <div className="error">{(create.error as Error).message}</div>

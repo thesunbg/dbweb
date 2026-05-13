@@ -8,6 +8,7 @@ import { Stats } from "./Stats.js";
 import { DocumentModal } from "./DocumentModal.js";
 import { DbTree, type TreeAction } from "./DbTree.js";
 import { downloadText, rowsToCsv, rowsToJson } from "../lib/export.js";
+import { autoQuoteSql } from "../lib/sql-autoquote.js";
 
 type Tab =
   | { kind: "editor" }
@@ -74,8 +75,37 @@ export function Workbench({ connection }: Props) {
     enabled: ping.isSuccess,
   });
 
+  // Object list — read from the same cache key DbTree populates, so the
+  // SQL auto-quote step (below) doesn't re-fetch. For non-PG/Oracle kinds
+  // we never read this and the query just stays unfetched.
+  const needsAutoQuote = connection.kind === "postgres" || connection.kind === "oracle";
+  const objectsForQuote = useQuery({
+    queryKey: ["objects", connection.id, database],
+    queryFn: () => api.listObjects(connection.id, database!),
+    enabled: needsAutoQuote && !!database && ping.isSuccess,
+  });
+
+  // Last auto-quote outcome — surfaced as a small toolbar note so the user
+  // knows we rewrote their SQL (and which names we quoted).
+  const [autoQuoteNote, setAutoQuoteNote] = useState<string | null>(null);
+
   const exec = useMutation({
-    mutationFn: () => api.execute(connection.id, statement, database),
+    mutationFn: () => {
+      let toRun = statement;
+      if (needsAutoQuote && objectsForQuote.data) {
+        const names = objectsForQuote.data.map((o) => o.name);
+        const rewritten = autoQuoteSql(statement, names);
+        if (rewritten.replaced.length > 0) {
+          toRun = rewritten.sql;
+          setAutoQuoteNote(`auto-quoted ${rewritten.replaced.map((n) => `"${n}"`).join(", ")}`);
+        } else {
+          setAutoQuoteNote(null);
+        }
+      } else {
+        setAutoQuoteNote(null);
+      }
+      return api.execute(connection.id, toRun, database);
+    },
     onSettled: () => qc.invalidateQueries({ queryKey: ["history", connection.id] }),
   });
 
@@ -168,6 +198,17 @@ export function Workbench({ connection }: Props) {
                   setTab({ kind: "editor" });
                   // Defer one tick so Monaco picks up the new value before run.
                   setTimeout(() => exec.mutate(), 0);
+                } else if (a.type === "export") {
+                  // Server streams the file; browser handles the download via
+                  // a transient anchor. Bypasses our JSON wrapper API since the
+                  // response body isn't JSON for csv/xlsx.
+                  const url = api.exportTableUrl(connection.id, a.database, a.table, a.format);
+                  const anchor = document.createElement("a");
+                  anchor.href = url;
+                  anchor.rel = "noopener";
+                  document.body.appendChild(anchor);
+                  anchor.click();
+                  anchor.remove();
                 }
               }}
             />
@@ -300,6 +341,11 @@ export function Workbench({ connection }: Props) {
                     {result.rowCount} rows · {result.elapsedMs}ms
                     {result.truncated && " · truncated"}
                     {result.affectedRows !== undefined && ` · ${result.affectedRows} affected`}
+                  </span>
+                )}
+                {autoQuoteNote && (
+                  <span className="muted hint" title="dbweb detected mixed-case table names and quoted them automatically">
+                    ✎ {autoQuoteNote}
                   </span>
                 )}
                 {result && result.fields.length > 0 && (

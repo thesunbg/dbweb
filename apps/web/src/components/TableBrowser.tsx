@@ -269,16 +269,21 @@ function buildSql(
     }
   }
   const where = parts.length > 0 ? ` WHERE ${parts.join(" AND ")}` : "";
-  // MSSQL uses TOP, others use LIMIT.
+
+  // Postgres tables come back from listObjects as `schema.table` for non-public
+  // schemas, plain `table` for public. Split here so we quote each part
+  // separately rather than producing the invalid `"audit.events"`.
+  if (kind === "postgres") {
+    const dotIdx = table.indexOf(".");
+    const schema = dotIdx === -1 ? "public" : table.slice(0, dotIdx);
+    const tbl = dotIdx === -1 ? table : table.slice(dotIdx + 1);
+    return `SELECT * FROM ${q(schema)}.${q(tbl)}${where} LIMIT ${limit}`;
+  }
   if (kind === "mssql") {
     return `SELECT TOP ${limit} * FROM ${q(database)}.dbo.${q(table)}${where}`;
   }
   if (kind === "oracle") {
     return `SELECT * FROM ${q(database)}.${q(table)}${where} FETCH FIRST ${limit} ROWS ONLY`;
-  }
-  if (kind === "postgres") {
-    const schema = q(database);
-    return `SELECT * FROM ${schema}.${q(table)}${where} LIMIT ${limit}`;
   }
   return `SELECT * FROM ${q(database)}.${q(table)}${where} LIMIT ${limit}`;
 }
