@@ -1,5 +1,5 @@
 import Redis from "ioredis";
-import type { ConnectionConfig } from "@dbweb/shared-types";
+import type { ConnectionConfig, DbKind } from "@dbweb/shared-types";
 import type {
   ColumnInfo,
   DbAdapter,
@@ -10,11 +10,20 @@ import type {
 } from "./types.js";
 import { registerAdapter } from "./registry.js";
 
-class RedisAdapter implements DbAdapter {
-  readonly kind = "redis" as const;
+/**
+ * Redis-wire-compatible adapter — used for both real Redis and drop-in
+ * replacements (Dragonfly, KeyDB) that speak RESP. The `kind` is taken at
+ * construction time so the same class powers multiple registry entries
+ * without code duplication; the only behavior difference is which version
+ * string the INFO reply parses out of.
+ */
+export class RedisAdapter implements DbAdapter {
+  readonly kind: DbKind;
   private client: Redis | null = null;
 
-  constructor(private readonly config: ConnectionConfig) {}
+  constructor(private readonly config: ConnectionConfig, kind: DbKind = "redis") {
+    this.kind = kind;
+  }
 
   private getClient(): Redis {
     if (this.client) return this.client;
@@ -55,7 +64,11 @@ class RedisAdapter implements DbAdapter {
     await c.ping();
     const elapsed = performance.now() - start;
     const info = await c.info("server");
-    const version = /redis_version:(\S+)/.exec(info)?.[1];
+    // Dragonfly reports `dragonfly_version:` instead of `redis_version:`; fall
+    // through both so either flavor surfaces a meaningful version string.
+    const version =
+      /dragonfly_version:(\S+)/.exec(info)?.[1] ??
+      /redis_version:(\S+)/.exec(info)?.[1];
     return { latencyMs: Math.round(elapsed), serverVersion: version };
   }
 
@@ -235,4 +248,4 @@ function formatReply(v: unknown): string {
   return String(v);
 }
 
-registerAdapter("redis", (config) => new RedisAdapter(config));
+registerAdapter("redis", (config) => new RedisAdapter(config, "redis"));

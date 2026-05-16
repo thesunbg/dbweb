@@ -22,6 +22,9 @@ const QUOTE: Record<ConnectionConfig["kind"], (s: string) => string> = {
   mssql: (s) => "[" + s.replace(/]/g, "]]") + "]",
   mongodb: (s) => s,
   redis: (s) => s,
+  dragonfly: (s) => s,
+  // ClickHouse follows MySQL's backtick convention for identifiers.
+  clickhouse: (s) => "`" + s.replace(/`/g, "``") + "`",
 };
 
 export function TableBrowser({ connection, database, table }: Props) {
@@ -62,7 +65,11 @@ export function TableBrowser({ connection, database, table }: Props) {
   });
 
   const pkCols = useMemo(() => cols.data?.filter((c) => c.primaryKey) ?? [], [cols.data]);
-  const canEdit = pkCols.length > 0;
+  // ClickHouse has primary-key columns in its schema but doesn't support
+  // synchronous row updates — gate the inline-edit UI on both PK detection
+  // and adapter capability so the user doesn't see edit affordances that
+  // would fail server-side with NOT_SUPPORTED.
+  const canEdit = pkCols.length > 0 && connection.kind !== "clickhouse";
 
   const rowKey = (row: unknown[]) => {
     if (!data.data || pkCols.length === 0) return "";

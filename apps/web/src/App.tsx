@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ConnectionConfig, DbKind } from "@dbweb/shared-types";
 import { api } from "./api.js";
@@ -16,6 +16,8 @@ const KIND_GLYPH: Record<DbKind, string> = {
   mssql: "Ms",
   mongodb: "Mo",
   redis: "Rd",
+  dragonfly: "Df",
+  clickhouse: "Ch",
 };
 
 export function App() {
@@ -24,6 +26,9 @@ export function App() {
   const [editing, setEditing] = useState<ConnectionConfig | null>(null);
   const [showPort, setShowPort] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The row whose `⋯` overflow menu is open. Only one row's menu is open at
+  // a time; clicking outside or selecting an action closes it.
+  const [menuFor, setMenuFor] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(
     () => localStorage.getItem("dbweb:sidebarCollapsed") === "1",
   );
@@ -162,56 +167,26 @@ export function App() {
                   title={activeSet.has(c.id) ? "connected" : "not connected"}
                 />
                 <span className="conn-name">{c.name}</span>
-                <button
-                  type="button"
-                  className="ghost icon"
-                  title="Copy URL"
-                  onClick={async (e) => {
-                    e.stopPropagation();
-                    // Capture the button BEFORE awaiting — React reuses the
-                    // synthetic event after async work completes, so
-                    // `e.currentTarget` would be null when we tried to
-                    // restore the label.
-                    const btn = e.currentTarget as HTMLButtonElement;
-                    const prev = btn.textContent ?? "⧉";
+                <ConnMenu
+                  open={menuFor === c.id}
+                  onToggle={() => setMenuFor((m) => (m === c.id ? null : c.id))}
+                  onClose={() => setMenuFor(null)}
+                  onCopyUrl={async () => {
                     try {
                       const { url } = await api.connectionUrl(c.id);
                       await navigator.clipboard.writeText(url);
-                      btn.textContent = "✓";
-                      setTimeout(() => {
-                        // Element may have unmounted — guard before touching.
-                        if (btn.isConnected) btn.textContent = prev;
-                      }, 1200);
                     } catch (err) {
                       alert(`Copy failed: ${(err as Error).message}`);
                     }
                   }}
-                >
-                  ⧉
-                </button>
-                <button
-                  type="button"
-                  className="ghost icon"
-                  title="Edit"
-                  onClick={(e) => {
-                    e.stopPropagation();
+                  onEdit={() => {
                     setEditing(c);
                     setShowForm(true);
                   }}
-                >
-                  ✎
-                </button>
-                <button
-                  type="button"
-                  className="ghost icon"
-                  title="Delete"
-                  onClick={(e) => {
-                    e.stopPropagation();
+                  onDelete={() => {
                     if (confirm(`Delete connection "${c.name}"?`)) remove.mutate(c.id);
                   }}
-                >
-                  ×
-                </button>
+                />
               </li>
             ))}
           </ul>
@@ -246,6 +221,99 @@ export function App() {
         />
       )}
       {showPort && <PortabilityModal onClose={() => setShowPort(false)} />}
+    </div>
+  );
+}
+
+interface ConnMenuProps {
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  onCopyUrl: () => void | Promise<void>;
+  onEdit: () => void;
+  onDelete: () => void;
+}
+
+/**
+ * Per-row overflow menu. Renders a single `⋯` trigger that, when clicked,
+ * pops up a small list of actions (Copy URL / Edit / Delete). Closes on
+ * outside click, Escape, or after any action runs.
+ *
+ * The trigger lives inside the conn-item row, so we stop propagation on
+ * every click — otherwise tapping anywhere on the menu would also fire the
+ * row's `onClick` and switch the active connection.
+ */
+function ConnMenu({ open, onToggle, onClose, onCopyUrl, onEdit, onDelete }: ConnMenuProps) {
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, onClose]);
+
+  return (
+    <div ref={wrapRef} className="conn-menu-wrap" onClick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        className={`ghost icon conn-menu-trigger ${open ? "open" : ""}`}
+        title="More actions"
+        onClick={onToggle}
+      >
+        ⋯
+      </button>
+      {open && (
+        <div className="conn-menu" role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            onClick={async () => {
+              await onCopyUrl();
+              setCopied(true);
+              // Brief confirmation flash before the menu auto-closes — the
+              // user expects feedback but doesn't need a separate toast.
+              setTimeout(() => {
+                setCopied(false);
+                onClose();
+              }, 700);
+            }}
+          >
+            {copied ? "✓ Copied" : "Copy URL"}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onEdit();
+              onClose();
+            }}
+          >
+            Edit
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="danger"
+            onClick={() => {
+              onDelete();
+              onClose();
+            }}
+          >
+            Delete
+          </button>
+        </div>
+      )}
     </div>
   );
 }

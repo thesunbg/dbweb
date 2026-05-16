@@ -270,7 +270,7 @@ function defaultActivate(
 ): TreeAction {
   if (kind === "mongodb")
     return { type: "set-statement", statement: `db.${name}.find()` };
-  if (kind === "redis")
+  if (kind === "redis" || kind === "dragonfly")
     return { type: "set-statement", statement: `KEY ${name}` };
   return { type: "browse", database, table: name };
 }
@@ -329,6 +329,9 @@ function buildShowColumns(
 
   if (kind === "mysql") {
     return `SHOW COLUMNS FROM ${quoteSqlTable(kind, qualified)}`;
+  }
+  if (kind === "clickhouse") {
+    return `DESCRIBE TABLE ${quoteSqlTable(kind, qualified)}`;
   }
   if (kind === "postgres") {
     return `SELECT column_name, data_type, is_nullable, column_default
@@ -472,7 +475,7 @@ function HostContextMenu({ x, y, kind, onPick }: HostContextMenuProps) {
             pick: { type: "action", action: { type: "run-statement", statement: "db.runCommand({ listDatabases: 1 })" } },
           },
         ]
-      : kind === "redis"
+      : kind === "redis" || kind === "dragonfly"
         ? [
             { label: "Refresh", pick: { type: "refresh" } },
             { sep: true, label: "", pick: { type: "refresh" } },
@@ -503,7 +506,9 @@ function HostContextMenu({ x, y, kind, onPick }: HostContextMenuProps) {
                       ? "SELECT @@VERSION AS version"
                       : kind === "oracle"
                         ? "SELECT banner FROM v$version WHERE ROWNUM = 1"
-                        : "SELECT version()",
+                        : kind === "clickhouse"
+                          ? "SELECT version() AS version, uptime() AS uptime_seconds"
+                          : "SELECT version()",
                 },
               },
             },

@@ -48,10 +48,10 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
         .send({ ok: false, error: { code: "CONNECT_FAILED", message: (err as Error).message } });
     }
 
-    if (adapter.kind === "redis") {
+    if (adapter.kind === "redis" || adapter.kind === "dragonfly") {
       return reply.code(400).send({
         ok: false,
-        error: { code: "NOT_SUPPORTED", message: "Export not applicable to Redis keys" },
+        error: { code: "NOT_SUPPORTED", message: "Export not applicable to key-value stores" },
       });
     }
 
@@ -118,6 +118,16 @@ function buildSelectAll(
   const t = quoteSqlTable(kind, table);
   if (kind === "mssql") return `SELECT TOP ${maxRows} * FROM ${t}`;
   if (kind === "oracle") return `SELECT * FROM ${t} FETCH FIRST ${maxRows} ROWS ONLY`;
+  if (kind === "clickhouse") {
+    // ClickHouse takes LIMIT just like Postgres but its `database.table`
+    // qualification doesn't survive the SQL-quoting helper (which targets
+    // Postgres-style "schema"."table"). Quote each part with backticks and
+    // build the qualified name directly.
+    const dot = table.indexOf(".");
+    const w = (s: string) => `\`${s.replace(/`/g, "``")}\``;
+    const qualified = dot === -1 ? w(table) : `${w(table.slice(0, dot))}.${w(table.slice(dot + 1))}`;
+    return `SELECT * FROM ${qualified} LIMIT ${maxRows}`;
+  }
   if (kind === "postgres") {
     // For Postgres we also split schema-qualified names; the existing helper
     // already handles both cases.

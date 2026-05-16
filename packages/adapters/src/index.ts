@@ -8,3 +8,5 @@ import "./mssql.js";
 import "./oracle.js";
 import "./mongodb.js";
 import "./redis.js";
+import "./dragonfly.js";
+import "./clickhouse.js";

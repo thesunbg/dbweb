@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@clickhouse/client": "^1.18.5",
     "@dbweb/shared-types": "workspace:*",
     "ioredis": "^5.4.2",
     "mongodb": "^3.7.4",

@@ -10,7 +10,16 @@ import {
 } from "../store/connections.js";
 import { dropAdapter, getActiveConnectionIds } from "../services/adapter-pool.js";
 
-const dbKindSchema = z.enum(["mysql", "postgres", "oracle", "mssql", "mongodb", "redis"]);
+const dbKindSchema = z.enum([
+  "mysql",
+  "postgres",
+  "oracle",
+  "mssql",
+  "mongodb",
+  "redis",
+  "dragonfly",
+  "clickhouse",
+]);
 
 const connectionInputSchema = z.object({
   name: z.string().min(1),
@@ -95,6 +104,8 @@ const KIND_TO_SCHEME: Record<DbKind, string> = {
   redis: "redis",
   mssql: "mssql",
   oracle: "oracle",
+  dragonfly: "dragonfly",
+  clickhouse: "clickhouse",
 };
 
 /**

@@ -147,7 +147,11 @@ class PostgresAdapter implements DbAdapter {
     const res = await this.getPool().query(statement);
     const elapsedMs = Math.round(performance.now() - start);
 
-    if (res.command && ["INSERT", "UPDATE", "DELETE"].includes(res.command)) {
+    const isDml = !!res.command && ["INSERT", "UPDATE", "DELETE"].includes(res.command);
+    const hasFields = !!res.fields && res.fields.length > 0;
+
+    // DML without RETURNING: no field metadata, just affectedRows.
+    if (isDml && !hasFields) {
       return {
         fields: [],
         rows: [],
@@ -163,7 +167,16 @@ class PostgresAdapter implements DbAdapter {
     const rows = limited.map((r) =>
       fields.map((f) => (r as Record<string, unknown>)[f]),
     );
-    return { fields, rows, rowCount: limited.length, elapsedMs, truncated };
+    return {
+      fields,
+      rows,
+      rowCount: limited.length,
+      // For DML with RETURNING, surface the server's affected count alongside
+      // the returned rows so callers don't have to infer it from rows.length.
+      ...(isDml ? { affectedRows: res.rowCount ?? limited.length } : {}),
+      elapsedMs,
+      truncated,
+    };
   }
 
   async getStats(database?: string): Promise<DbStats> {

@@ -110,15 +110,22 @@ class MysqlAdapter implements DbAdapter {
 
   async describeObject(database: string, name: string): Promise<ColumnInfo[]> {
     return this.withConn(async (c) => {
+      // Alias every column to a lowercase identifier — MySQL 8 returns
+      // information_schema column names in upper-case under most builds, so
+      // unaliased reads (`r.column_name`) come back as undefined.
       const [rows] = await c.query<Row[]>(
-        `SELECT column_name, data_type, is_nullable, column_key, column_default
+        `SELECT column_name AS col_name,
+                data_type AS data_type,
+                is_nullable AS is_nullable,
+                column_key AS column_key,
+                column_default AS column_default
          FROM information_schema.columns
          WHERE table_schema = ? AND table_name = ?
          ORDER BY ordinal_position`,
         [database, name],
       );
       return rows.map((r) => ({
-        name: r.column_name as string,
+        name: r.col_name as string,
         dataType: r.data_type as string,
         nullable: r.is_nullable === "YES",
         primaryKey: r.column_key === "PRI",
@@ -176,15 +183,19 @@ class MysqlAdapter implements DbAdapter {
         };
       }
 
+      // Alias unprefixed information_schema columns — MySQL 8 returns them
+      // upper-cased on most builds, so unaliased reads come back undefined.
       const [rows] = await c.query<Row[]>(
-        `SELECT table_name, table_rows, data_length + index_length AS size_bytes
+        `SELECT table_name AS tbl_name,
+                table_rows AS row_count,
+                data_length + index_length AS size_bytes
          FROM information_schema.tables WHERE table_schema = ?`,
         [target],
       );
       const rowEstimates: Record<string, number> = {};
       let totalSize = 0;
       for (const r of rows) {
-        rowEstimates[r.table_name as string] = Number(r.table_rows ?? 0);
+        rowEstimates[r.tbl_name as string] = Number(r.row_count ?? 0);
         totalSize += Number(r.size_bytes ?? 0);
       }
       return {

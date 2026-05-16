@@ -20,6 +20,14 @@ const SCHEME_TO_KIND: Record<string, DbKind> = {
   "sqlserver:": "mssql",
   "oracle:": "oracle",
   "oracledb:": "oracle",
+  "dragonfly:": "dragonfly",
+  // Dragonfly speaks the Redis wire protocol so connection strings emitted by
+  // ORMs / kubectl-style tooling tend to start with `redis://`. We don't list
+  // those as Dragonfly here on purpose — the user can switch the kind in the
+  // form after pasting if the target really is Dragonfly.
+  "clickhouse:": "clickhouse",
+  "clickhouse+http:": "clickhouse",
+  "clickhouse+https:": "clickhouse",
 };
 
 const KIND_TO_SCHEME: Record<DbKind, string> = {
@@ -29,6 +37,8 @@ const KIND_TO_SCHEME: Record<DbKind, string> = {
   redis: "redis",
   mssql: "mssql",
   oracle: "oracle",
+  dragonfly: "dragonfly",
+  clickhouse: "clickhouse",
 };
 
 const DEFAULT_PORTS: Record<DbKind, number> = {
@@ -38,6 +48,10 @@ const DEFAULT_PORTS: Record<DbKind, number> = {
   mssql: 1433,
   mongodb: 27017,
   redis: 6379,
+  dragonfly: 6379,
+  // ClickHouse HTTP — native TCP (9000) needs a different driver, which
+  // dbweb doesn't ship today.
+  clickhouse: 8123,
 };
 
 export interface ParsedConnection {

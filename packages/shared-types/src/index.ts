@@ -4,7 +4,9 @@ export type DbKind =
   | "oracle"
   | "mssql"
   | "mongodb"
-  | "redis";
+  | "redis"
+  | "dragonfly"
+  | "clickhouse";
 
 export interface ConnectionConfig {
   id: string;

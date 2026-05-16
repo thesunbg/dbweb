@@ -48,12 +48,47 @@ ul { list-style: none; padding: 0; margin: 0; }
 
 .conn-item {
   display: flex; align-items: center; gap: 8px;
-  padding: 8px; border-radius: 6px; cursor: pointer;
+  padding: 6px 8px; border-radius: 6px; cursor: pointer;
   position: relative;
 }
 .conn-item:hover { background: var(--panel-2); }
 .conn-item.active { background: rgba(79, 140, 255, 0.12); }
-.conn-name { font-size: 14px; flex: 1; }
+.conn-name {
+  font-size: 14px; flex: 1; min-width: 0;
+  /* Long names truncate with an ellipsis rather than wrapping to two lines —
+     keeps every row at the same height and matches the badge alignment. */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Overflow menu (⋯). Trigger is hidden by default and revealed on row
+   hover or when the row is the active selection — this de-clutters the
+   sidebar in its resting state. Once open, the trigger stays visible
+   regardless of hover. */
+.conn-menu-wrap { position: relative; flex-shrink: 0; }
+.conn-menu-trigger {
+  font-size: 18px; line-height: 1; padding: 0 4px;
+  opacity: 0; transition: opacity 80ms ease;
+}
+.conn-item:hover .conn-menu-trigger,
+.conn-item.active .conn-menu-trigger,
+.conn-menu-trigger.open { opacity: 0.7; }
+.conn-menu-trigger:hover, .conn-menu-trigger.open { opacity: 1 !important; }
+
+.conn-menu {
+  position: absolute; top: calc(100% + 2px); right: 0;
+  min-width: 140px; z-index: 20;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  padding: 4px; display: flex; flex-direction: column;
+}
+.conn-menu button {
+  background: transparent; border: none; color: var(--text);
+  text-align: left; padding: 6px 10px; border-radius: 4px;
+  font-size: 13px; cursor: pointer;
+}
+.conn-menu button:hover { background: var(--panel-2); }
+.conn-menu button.danger { color: var(--error); }
+.conn-menu button.danger:hover { background: rgba(255,107,107,0.12); }
 
 .badge {
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
@@ -65,6 +100,8 @@ ul { list-style: none; padding: 0; margin: 0; }
 .kind-redis    { background: rgba(208, 50, 50, 0.25); color: #ff8585; }
 .kind-oracle   { background: rgba(160, 60, 30, 0.3); color: #ffb088; }
 .kind-mssql    { background: rgba(140, 80, 0, 0.3); color: #ffc97a; }
+.kind-dragonfly { background: rgba(130, 60, 180, 0.3); color: #c89aff; }
+.kind-clickhouse { background: rgba(180, 165, 40, 0.3); color: #f0d770; }
 
 /* Compact connection icon (replaces the wide text badge) */
 .conn-icon {

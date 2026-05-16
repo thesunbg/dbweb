@@ -11,6 +11,8 @@ const DEFAULT_PORTS: Record<DbKind, number> = {
   mssql: 1433,
   mongodb: 27017,
   redis: 6379,
+  dragonfly: 6379,
+  clickhouse: 8123,
 };
 
 interface Props {
@@ -141,6 +143,8 @@ export function ConnectionForm({ editing, onClose }: Props) {
               <option value="mssql">MSSQL</option>
               <option value="mongodb">MongoDB</option>
               <option value="redis">Redis</option>
+              <option value="dragonfly">Dragonfly</option>
+              <option value="clickhouse">ClickHouse</option>
             </select>
           </label>
 

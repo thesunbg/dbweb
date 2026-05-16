@@ -23,6 +23,8 @@ const STARTERS: Record<ConnectionConfig["kind"], string> = {
   mssql: "SELECT GETDATE() AS now",
   mongodb: '{ "find": "users", "filter": {}, "limit": 50 }',
   redis: "INFO server",
+  dragonfly: "INFO server",
+  clickhouse: "SELECT version() AS v, now() AS now",
 };
 
 const LANGUAGES: Record<ConnectionConfig["kind"], string> = {
@@ -32,6 +34,8 @@ const LANGUAGES: Record<ConnectionConfig["kind"], string> = {
   mssql: "sql",
   mongodb: "json",
   redis: "shell",
+  dragonfly: "shell",
+  clickhouse: "sql",
 };
 
 interface Props {
