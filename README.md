@@ -1,6 +1,6 @@
 # dbweb
 
-Local-first web admin for multiple database engines (MySQL, Postgres, Oracle, MSSQL, MongoDB, Redis), inspired by Robo3T / phpMyAdmin but cross-DBMS, bound exclusively to `127.0.0.1`.
+Local-first web admin for multiple database engines (MySQL, Postgres, Oracle, MSSQL, MongoDB, Redis, Dragonfly, ClickHouse), inspired by Robo3T / phpMyAdmin but cross-DBMS, bound exclusively to `127.0.0.1`.
 
 ![architecture](https://img.shields.io/badge/stack-Node.js%2022%20LTS-339933) ![architecture](https://img.shields.io/badge/frontend-React%20%2B%20Vite-61DAFB) ![architecture](https://img.shields.io/badge/backend-Fastify%205-000000)
 
@@ -48,7 +48,9 @@ packages/
       mssql.ts             tedious
       mongodb.ts           mongodb@3.7 (legacy server compat)
       mongodb-shell.ts     vm-sandboxed shell evaluator
-      redis.ts             ioredis
+      redis.ts             ioredis (used by both `redis` and `dragonfly` kinds)
+      dragonfly.ts         thin Redis-compat alias
+      clickhouse.ts        @clickhouse/client (HTTP)
 types/
   oracledb.d.ts            type shim for oracledb (driver ships none)
 ```
@@ -123,6 +125,8 @@ The **master encryption key** lives in the **macOS Keychain** by default (servic
 | MSSQL | `tedious` | 1433 | 2017+ | ✓ | — |
 | MongoDB | `mongodb@3.7` + `mongodb@6` | 27017 | **2.6 → 8.x** (auto-fallback) | ✓ | ✓ (replace doc) |
 | Redis | `ioredis` | 6379 | 4+ | ✓ | — |
+| Dragonfly | `ioredis` (Redis-compat) | 6379 | 1.x+ | ✓ | — |
+| ClickHouse | `@clickhouse/client` (HTTP) | 8123 | 22+ / 25+ / 26+ | ✓ | — (mutations are async; use `ALTER TABLE … UPDATE` from the workbench) |
 
 ### Workbench
 
@@ -201,6 +205,45 @@ Helpers automatically available: `ObjectId(...)`, `ISODate(...)`, `Date`, `Numbe
 
 Blocked commands (safety): `flushall`, `flushdb`, `shutdown`, `config`, `debug`.
 
+### Dragonfly — Redis drop-in
+
+Dragonfly speaks the Redis wire protocol verbatim, so dbweb shares the `ioredis` driver for both. The only reason `dragonfly` exists as a separate kind is so the sidebar can label the connection accurately and the version probe pulls `dragonfly_version:` (instead of `redis_version:`) out of `INFO server`. Same commands, same workbench shortcuts, same key types — pick the kind that matches what's actually running.
+
+### ClickHouse
+
+ClickHouse is reached over its HTTP interface via `@clickhouse/client`. The workbench dispatches per statement:
+
+- **Readonly statements** (`SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN`, `EXISTS`, `WITH`) go through `client.query()` and stream rows back via `JSONCompactEachRowWithNames` so field names round-trip with their values.
+- **Everything else** (DDL, INSERT, ALTER, OPTIMIZE, TRUNCATE, DROP …) goes through `client.command()`; ClickHouse's HTTP API does not return an affected-row count for these, so the result surfaces `affectedRows: 0` to signal "success, no rows reported".
+
+```sql
+SHOW DATABASES;
+SHOW TABLES FROM default;
+DESCRIBE TABLE system.parts;
+SELECT version(), now(), hostName();
+
+-- Heavy aggregates work straight in the editor:
+SELECT toStartOfHour(event_time) AS h, count() AS n
+FROM events
+WHERE event_date = today()
+GROUP BY h ORDER BY h;
+
+-- Mutations are async — they queue a background mutation rather than blocking:
+ALTER TABLE events UPDATE status = 'done' WHERE id = 42;
+```
+
+Connection options (passed under `options` on the connection):
+
+| Option | Default | Effect |
+|---|---|---|
+| `tls` | `false` | Use HTTPS (`https://host:port`) instead of HTTP. Set this when terminating TLS at a proxy like Traefik or Cloudflare. |
+| `protocol` | derived from `tls` | Explicit override; either `"http"` or `"https"`. Wins over `tls`. |
+| `compression` | `false` | Compress the request body. Response compression stays off because Node's `fetch` handles transfer encoding for us. |
+
+Inline row edit is intentionally disabled for ClickHouse — see the [Inline edit](#inline-row-edit) column in the support table.
+
+> **Coolify gotcha:** the official Coolify v4 ClickHouse template publishes only the native TCP port (9000) through its proxy. Since dbweb's adapter is HTTP-only, the bundled "Make it publicly available" toggle won't reach `8123`. Use `clickhouse.cloud`, a self-managed image with explicit `-p 8123:8123`, or front the container with Traefik/HTTPS routed to 8123.
+
 ### Portability — export / import
 
 - **Connection bundle**: `.dbweb` file in the `DBWEB1:salt:iv:tag:ciphertext` format. AES-256-GCM with a key derived from the passphrase (≥8 chars) via scrypt + 16-byte salt. Wrong passphrase → `DECRYPT_FAILED` (GCM auth tag protects against silent corruption).
@@ -220,8 +263,7 @@ Blocked commands (safety): `flushall`, `flushdb`, `shutdown`, `config`, `debug`.
 |---|---|
 | Run query | `⌘ Enter` (mac) / `Ctrl + Enter` (Win/Linux) |
 | New connection | `+` in the sidebar |
-| Edit connection | `✎` per-connection |
-| Delete connection | `×` per-connection |
+| Connection actions (Copy URL, Edit, Delete) | `⋯` per-connection — opens an overflow menu; closes on outside click / Escape |
 | Export / Import | `⇅` in the sidebar |
 | Collapse connections sidebar | `‹` in the sidebar header |
 | Collapse db-tree | `‹` in the workbench tree header |
@@ -238,6 +280,7 @@ Blocked commands (safety): `flushall`, `flushdb`, `shutdown`, `config`, `debug`.
 - [ ] `AbortSignal` cancellation for long-running queries
 - [ ] Robo3T-style hierarchical JSON tree (key / value / type columns) — currently only pretty-printed JSON
 - [ ] Multiple parallel query tabs
+- [ ] ClickHouse native TCP support — current HTTP adapter can't reach Coolify's default proxy mapping
 - [ ] Tauri build for a packaged desktop binary
 
 ## License
