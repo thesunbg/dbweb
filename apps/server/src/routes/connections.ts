@@ -4,6 +4,7 @@ import type { ConnectionConfig, DbKind } from "@dbweb/shared-types";
 import {
   createConnection,
   deleteConnection,
+  duplicateConnection,
   getConnection,
   listConnections,
   updateConnection,
@@ -72,6 +73,16 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ ok: false, error: { code: "BAD_INPUT", message: parsed.error.message } });
     }
     const conn = await createConnection(parsed.data);
+    return { ok: true, data: conn };
+  });
+
+  app.post("/api/connections/:id/duplicate", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const conn = await duplicateConnection(id);
+    if (!conn)
+      return reply
+        .code(404)
+        .send({ ok: false, error: { code: "NOT_FOUND", message: "Connection not found" } });
     return { ok: true, data: conn };
   });
 

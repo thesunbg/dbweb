@@ -115,6 +115,37 @@ export async function updateConnection(
   return getConnection(id);
 }
 
+/**
+ * Clone an existing connection into a brand-new one. Copies every field —
+ * including the (decrypted then re-encrypted) password and options — so the
+ * duplicate is immediately usable. The name gets a " (copy)" suffix, made
+ * unique against the current set so repeated duplicates don't collide.
+ */
+export async function duplicateConnection(id: string): Promise<ConnectionConfig | null> {
+  const src = await getConnection(id, true);
+  if (!src) return null;
+  const existingNames = new Set((await listConnections()).map((c) => c.name));
+  return createConnection({
+    name: uniqueCopyName(src.name, existingNames),
+    kind: src.kind,
+    host: src.host,
+    port: src.port,
+    username: src.username,
+    password: src.password,
+    database: src.database,
+    options: src.options,
+  });
+}
+
+function uniqueCopyName(base: string, taken: Set<string>): string {
+  const first = `${base} (copy)`;
+  if (!taken.has(first)) return first;
+  for (let i = 2; ; i++) {
+    const candidate = `${base} (copy ${i})`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
 export function deleteConnection(id: string): boolean {
   const res = getDb().prepare("DELETE FROM connections WHERE id = ?").run(id);
   return res.changes > 0;

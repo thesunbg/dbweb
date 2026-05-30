@@ -48,6 +48,8 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(patch),
     }),
+  duplicateConnection: (id: string) =>
+    request<ConnectionConfig>(`/api/connections/${id}/duplicate`, { method: "POST" }),
   deleteConnection: (id: string) =>
     request<{ id: string }>(`/api/connections/${id}`, { method: "DELETE" }),
 
@@ -134,10 +136,10 @@ export const api = {
     return `/api/connections/${id}/export?${params.toString()}`;
   },
 
-  exportConfigs: (passphrase: string) =>
+  exportConfigs: (passphrase: string, ids?: string[]) =>
     request<{ payload: string; count: number }>("/api/portability/export", {
       method: "POST",
-      body: JSON.stringify({ passphrase }),
+      body: JSON.stringify(ids ? { passphrase, ids } : { passphrase }),
     }),
   importConfigs: (passphrase: string, payload: string) =>
     request<{ imported: number }>("/api/portability/import", {

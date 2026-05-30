@@ -247,6 +247,9 @@ Inline row edit is intentionally disabled for ClickHouse — see the [Inline edi
 ### Portability — export / import
 
 - **Connection bundle**: `.dbweb` file in the `DBWEB1:salt:iv:tag:ciphertext` format. AES-256-GCM with a key derived from the passphrase (≥8 chars) via scrypt + 16-byte salt. Wrong passphrase → `DECRYPT_FAILED` (GCM auth tag protects against silent corruption).
+  - **All connections**: the sidebar `⇅` button exports every connection and imports any bundle (1 or N entries).
+  - **Single connection**: `⋯ → Export…` on a row bundles just that connection (filename `dbweb-<name>-<date>.dbweb`). Server-side this is the same endpoint with an `ids` allow-list — omit `ids` for the bulk export. Import is shared: a single-connection bundle just imports one entry.
+- **Duplicate**: `⋯ → Duplicate` clones a connection in place (password + options copied), naming it `<name> (copy)`, `(copy 2)`, … to avoid collisions. The new copy is auto-selected.
 - **Query result**: CSV or JSON download straight from the result toolbar.
 
 ### Security
@@ -263,8 +266,8 @@ Inline row edit is intentionally disabled for ClickHouse — see the [Inline edi
 |---|---|
 | Run query | `⌘ Enter` (mac) / `Ctrl + Enter` (Win/Linux) |
 | New connection | `+` in the sidebar |
-| Connection actions (Copy URL, Edit, Delete) | `⋯` per-connection — opens an overflow menu; closes on outside click / Escape |
-| Export / Import | `⇅` in the sidebar |
+| Connection actions (Copy URL, Edit, Duplicate, Export…, Delete) | `⋯` per-connection — opens an overflow menu; closes on outside click / Escape |
+| Export / Import all connections | `⇅` in the sidebar |
 | Collapse connections sidebar | `‹` in the sidebar header |
 | Collapse db-tree | `‹` in the workbench tree header |
 | Toggle Table / JSON view | Segmented control in the editor toolbar |

@@ -4,16 +4,22 @@ import { api } from "../api.js";
 
 interface Props {
   onClose: () => void;
+  /**
+   * When set, the modal is scoped to a single connection: export only bundles
+   * that connection (the Import tab is hidden). When omitted, it operates on
+   * every connection (the sidebar's bulk ⇅ action).
+   */
+  scope?: { id: string; name: string };
 }
 
-export function PortabilityModal({ onClose }: Props) {
+export function PortabilityModal({ onClose, scope }: Props) {
   const qc = useQueryClient();
   const [mode, setMode] = useState<"export" | "import">("export");
   const [passphrase, setPassphrase] = useState("");
   const [payload, setPayload] = useState("");
 
   const exportMut = useMutation({
-    mutationFn: () => api.exportConfigs(passphrase),
+    mutationFn: () => api.exportConfigs(passphrase, scope ? [scope.id] : undefined),
     onSuccess: (data) => setPayload(data.payload),
   });
   const importMut = useMutation({
@@ -28,7 +34,11 @@ export function PortabilityModal({ onClose }: Props) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `dbweb-export-${new Date().toISOString().slice(0, 10)}.dbweb`;
+    // Scoped exports get a filename derived from the connection name so the
+    // user can tell single-connection bundles apart from full backups.
+    const stamp = new Date().toISOString().slice(0, 10);
+    const safe = scope ? scope.name.replace(/[^\w.-]+/g, "_") : "all";
+    a.download = `dbweb-${safe}-${stamp}.dbweb`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -41,25 +51,27 @@ export function PortabilityModal({ onClose }: Props) {
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <h3>Export / Import connections</h3>
+          <h3>{scope ? `Export connection: ${scope.name}` : "Export / Import connections"}</h3>
           <button type="button" className="ghost" onClick={onClose}>×</button>
         </div>
-        <div className="tabs">
-          <button
-            type="button"
-            className={`tab ${mode === "export" ? "active" : ""}`}
-            onClick={() => setMode("export")}
-          >
-            Export
-          </button>
-          <button
-            type="button"
-            className={`tab ${mode === "import" ? "active" : ""}`}
-            onClick={() => setMode("import")}
-          >
-            Import
-          </button>
-        </div>
+        {!scope && (
+          <div className="tabs">
+            <button
+              type="button"
+              className={`tab ${mode === "export" ? "active" : ""}`}
+              onClick={() => setMode("export")}
+            >
+              Export
+            </button>
+            <button
+              type="button"
+              className={`tab ${mode === "import" ? "active" : ""}`}
+              onClick={() => setMode("import")}
+            >
+              Import
+            </button>
+          </div>
+        )}
 
         <div className="modal-body">
           <label>
@@ -80,7 +92,11 @@ export function PortabilityModal({ onClose }: Props) {
                 disabled={passphrase.length < 8 || exportMut.isPending}
                 onClick={() => exportMut.mutate()}
               >
-                {exportMut.isPending ? "Encrypting..." : "Export current connections"}
+                {exportMut.isPending
+                  ? "Encrypting..."
+                  : scope
+                    ? "Export this connection"
+                    : "Export current connections"}
               </button>
               {exportMut.isError && (
                 <div className="error">{(exportMut.error as Error).message}</div>

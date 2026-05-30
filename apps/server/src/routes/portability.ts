@@ -8,7 +8,13 @@ import {
 } from "../store/connections.js";
 import { keyFromPassphrase } from "../store/secrets.js";
 
-const exportSchema = z.object({ passphrase: z.string().min(8) });
+const exportSchema = z.object({
+  passphrase: z.string().min(8),
+  // Optional allow-list of connection IDs. When present, only those
+  // connections are exported (used by the per-connection "Export" action);
+  // when absent, every connection is bundled (the sidebar's bulk export).
+  ids: z.array(z.string()).optional(),
+});
 const importSchema = z.object({
   passphrase: z.string().min(8),
   payload: z.string().min(1),
@@ -41,8 +47,10 @@ export async function portabilityRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const list = await listConnections();
+    const wanted = parsed.data.ids ? new Set(parsed.data.ids) : null;
     const entries: BundleEntry[] = [];
     for (const c of list) {
+      if (wanted && !wanted.has(c.id)) continue;
       // We need plaintext password to re-import elsewhere; pull via secret store.
       const full = await getConnection(c.id, true);
       if (!full) continue;

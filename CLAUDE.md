@@ -66,9 +66,14 @@ Two completed examples to cargo-cult:
 - **MongoDB** ships two drivers side-by-side (modern `mongodb@6` + legacy `mongodb@3.7`). The dispatcher tries modern first, falls back on wire-version mismatch. Don't add code that assumes a single driver.
 - **ClickHouse inline edit** is intentionally absent — `ALTER … UPDATE` is async, no synchronous affected-row count, so the route returns 501 NOT_SUPPORTED and `TableBrowser` hides the edit affordance via `connection.kind !== "clickhouse"`.
 
+## Connection management actions
+
+- **Duplicate**: `duplicateConnection(id)` in `store/connections.ts` → `POST /api/connections/:id/duplicate`. Reads the source *with* secret, re-encrypts the password into a fresh row, names it `<name> (copy)` / `(copy 2)` via `uniqueCopyName`. UI auto-selects the new copy.
+- **Per-connection export**: the `/api/portability/export` body takes an optional `ids: string[]` allow-list. Present → bundle only those connections; absent → bundle all (the sidebar `⇅` bulk flow). `PortabilityModal` takes a `scope?: { id, name }` prop — scoped mode hides the Import tab and passes `[scope.id]`. Import is unchanged: it accepts any `DBWEB1:` bundle of 1 or N entries.
+
 ## Frontend conventions
 
-- Per-connection actions (Copy URL / Edit / Delete) live behind a single `⋯` overflow menu (`ConnMenu` in `App.tsx`). When adding a new connection-level action, add it to that menu, not inline next to the row.
+- Per-connection actions (Copy URL / Edit / Duplicate / Export… / Delete) live behind a single `⋯` overflow menu (`ConnMenu` in `App.tsx`). When adding a new connection-level action, add it to that menu, not inline next to the row.
 - Long connection names use `text-overflow: ellipsis` — every `.conn-item` is fixed 36px height. Don't reintroduce per-row icons that break the alignment.
 - The kind badge (`.conn-icon`) is 24×24 with a 2-char glyph. Single-letter glyphs collide (MySQL vs MongoDB).
 - UI prefs in `localStorage` under the `dbweb:` namespace (`sidebarCollapsed`, `treeCollapsed`, `editorHeight`, `resultView`). Use the same prefix for new toggles.

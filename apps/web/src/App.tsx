@@ -25,6 +25,9 @@ export function App() {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<ConnectionConfig | null>(null);
   const [showPort, setShowPort] = useState(false);
+  // When set, the portability modal opens scoped to a single connection
+  // (Export… from the ⋯ menu). Null means the bulk ⇅ flow.
+  const [exportScope, setExportScope] = useState<{ id: string; name: string } | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // The row whose `⋯` overflow menu is open. Only one row's menu is open at
   // a time; clicking outside or selecting an action closes it.
@@ -59,6 +62,16 @@ export function App() {
       qc.invalidateQueries({ queryKey: ["connections"] });
       if (selectedId === id) setSelectedId(null);
     },
+  });
+
+  const duplicate = useMutation({
+    mutationFn: (id: string) => api.duplicateConnection(id),
+    onSuccess: (created) => {
+      qc.invalidateQueries({ queryKey: ["connections"] });
+      // Select the freshly-created copy so the user sees the result land.
+      setSelectedId(created.id);
+    },
+    onError: (err) => alert(`Duplicate failed: ${(err as Error).message}`),
   });
 
   const selected = connections.data?.find((c) => c.id === selectedId) ?? null;
@@ -183,6 +196,8 @@ export function App() {
                     setEditing(c);
                     setShowForm(true);
                   }}
+                  onDuplicate={() => duplicate.mutate(c.id)}
+                  onExport={() => setExportScope({ id: c.id, name: c.name })}
                   onDelete={() => {
                     if (confirm(`Delete connection "${c.name}"?`)) remove.mutate(c.id);
                   }}
@@ -221,6 +236,9 @@ export function App() {
         />
       )}
       {showPort && <PortabilityModal onClose={() => setShowPort(false)} />}
+      {exportScope && (
+        <PortabilityModal scope={exportScope} onClose={() => setExportScope(null)} />
+      )}
     </div>
   );
 }
@@ -231,6 +249,8 @@ interface ConnMenuProps {
   onClose: () => void;
   onCopyUrl: () => void | Promise<void>;
   onEdit: () => void;
+  onDuplicate: () => void;
+  onExport: () => void;
   onDelete: () => void;
 }
 
@@ -243,7 +263,7 @@ interface ConnMenuProps {
  * every click — otherwise tapping anywhere on the menu would also fire the
  * row's `onClick` and switch the active connection.
  */
-function ConnMenu({ open, onToggle, onClose, onCopyUrl, onEdit, onDelete }: ConnMenuProps) {
+function ConnMenu({ open, onToggle, onClose, onCopyUrl, onEdit, onDuplicate, onExport, onDelete }: ConnMenuProps) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -300,6 +320,26 @@ function ConnMenu({ open, onToggle, onClose, onCopyUrl, onEdit, onDelete }: Conn
             }}
           >
             Edit
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onDuplicate();
+              onClose();
+            }}
+          >
+            Duplicate
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onExport();
+              onClose();
+            }}
+          >
+            Export…
           </button>
           <button
             type="button"
