@@ -142,7 +142,10 @@ class PostgresAdapter implements DbAdapter {
   }
 
   async execute(statement: string, opts: ExecuteOptions = {}): Promise<QueryResult> {
-    const maxRows = opts.maxRows ?? 1000;
+    // Default cap matches the interactive editor's intent: show a preview,
+    // not the whole table. Callers that want more (server export route,
+    // explicit `?limit=`) pass `maxRows` explicitly.
+    const maxRows = opts.maxRows ?? 50;
     const start = performance.now();
     const res = await this.getPool().query(statement);
     const elapsedMs = Math.round(performance.now() - start);

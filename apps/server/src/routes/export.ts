@@ -12,13 +12,16 @@ interface ExportQuery {
 
 /**
  * Single-table dump endpoint. Builds a select-all (or `db.coll.find()` on
- * Mongo) and streams the formatted output. The hard cap is generous — at
- * 1M rows in a single table we're already past the point where an admin
- * tool is the right choice; large dumps belong in mysqldump/pg_dump/
- * mongoexport. We keep this in-memory for v1; switching to a streaming
- * encoder is a follow-up if anyone hits the cap.
+ * Mongo) and streams the formatted output. By default the export is
+ * unbounded — the user clicked "Export CSV" on a table expecting *the
+ * whole table*, not a silently capped slice. Callers who do want a cap
+ * pass `?limit=<n>`.
+ *
+ * The buffered (in-memory) encoder is fine for small/medium tables; for
+ * really huge dumps (multi-GB) the user should reach for
+ * mysqldump/pg_dump/mongoexport. Switching this endpoint to a streaming
+ * encoder is the right follow-up if anyone reports OOM.
  */
-const MAX_ROWS = 1_000_000;
 
 export async function exportRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/connections/:id/export", async (req, reply) => {
@@ -34,10 +37,11 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
         .code(400)
         .send({ ok: false, error: { code: "BAD_INPUT", message: "format must be json|csv|xlsx" } });
     }
-    const maxRows = Math.min(
-      MAX_ROWS,
-      q.limit ? Math.max(1, parseInt(q.limit, 10) || MAX_ROWS) : MAX_ROWS,
-    );
+    // When the client passes `?limit=N` we honor it; otherwise we leave the
+    // row count uncapped on purpose (see the comment on this endpoint).
+    const parsedLimit = q.limit ? parseInt(q.limit, 10) : NaN;
+    const maxRows: number | undefined =
+      Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : undefined;
 
     let adapter;
     try {
@@ -58,7 +62,13 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
     const statement = buildSelectAll(adapter.kind, q.database, q.table, maxRows);
     let result;
     try {
-      result = await adapter.execute(statement, { maxRows });
+      // The adapter's `execute` uses its own internal default cap when
+      // `maxRows` is omitted (1000 rows). For an export endpoint that
+      // default would silently truncate; pass MAX_SAFE_INTEGER so the
+      // adapter's truncate-check is a no-op when the caller asked for "all".
+      result = await adapter.execute(statement, {
+        maxRows: maxRows ?? Number.MAX_SAFE_INTEGER,
+      });
     } catch (err) {
       return reply.code(400).send({
         ok: false,
@@ -103,21 +113,31 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
  * Build a dialect-aware SELECT *. Mongo gets a shell expression because the
  * adapter dispatches on the `db.` prefix; Redis is rejected before this is
  * called.
+ *
+ * `maxRows = undefined` means "no cap" — emit the statement without a
+ * LIMIT/TOP/FETCH clause so the whole table comes back. The route layer
+ * decides whether to cap; this helper just renders what it's told.
  */
 function buildSelectAll(
   kind: DbKind,
   database: string,
   table: string,
-  maxRows: number,
+  maxRows: number | undefined,
 ): string {
   if (kind === "mongodb") {
-    // The shell evaluator only auto-limits when the user didn't set one, so
-    // an explicit .limit() is needed here to honor the cap.
-    return `db.${table}.find().limit(${maxRows})`;
+    // The shell evaluator only auto-limits when the user didn't set one;
+    // we only emit an explicit `.limit()` when the caller actually wants
+    // a cap. Without it the runner pulls every document.
+    return maxRows == null
+      ? `db.${table}.find()`
+      : `db.${table}.find().limit(${maxRows})`;
   }
   const t = quoteSqlTable(kind, table);
-  if (kind === "mssql") return `SELECT TOP ${maxRows} * FROM ${t}`;
-  if (kind === "oracle") return `SELECT * FROM ${t} FETCH FIRST ${maxRows} ROWS ONLY`;
+  if (kind === "mssql") return maxRows == null ? `SELECT * FROM ${t}` : `SELECT TOP ${maxRows} * FROM ${t}`;
+  if (kind === "oracle")
+    return maxRows == null
+      ? `SELECT * FROM ${t}`
+      : `SELECT * FROM ${t} FETCH FIRST ${maxRows} ROWS ONLY`;
   if (kind === "clickhouse") {
     // ClickHouse takes LIMIT just like Postgres but its `database.table`
     // qualification doesn't survive the SQL-quoting helper (which targets
@@ -126,15 +146,12 @@ function buildSelectAll(
     const dot = table.indexOf(".");
     const w = (s: string) => `\`${s.replace(/`/g, "``")}\``;
     const qualified = dot === -1 ? w(table) : `${w(table.slice(0, dot))}.${w(table.slice(dot + 1))}`;
-    return `SELECT * FROM ${qualified} LIMIT ${maxRows}`;
+    return maxRows == null
+      ? `SELECT * FROM ${qualified}`
+      : `SELECT * FROM ${qualified} LIMIT ${maxRows}`;
   }
-  if (kind === "postgres") {
-    // For Postgres we also split schema-qualified names; the existing helper
-    // already handles both cases.
-    return `SELECT * FROM ${t} LIMIT ${maxRows}`;
-  }
-  // mysql
-  return `SELECT * FROM ${t} LIMIT ${maxRows}`;
+  // postgres / mysql / mariadb
+  return maxRows == null ? `SELECT * FROM ${t}` : `SELECT * FROM ${t} LIMIT ${maxRows}`;
   // `database` is currently unused at this layer — the adapter selects the
   // right DB internally based on its own state. Kept on the signature so we
   // can route per-DB pool selection later without changing callers.
@@ -182,15 +199,26 @@ function toCellValue(v: unknown): string | number | boolean | null {
 function csvEscape(v: unknown): string {
   const cell = toCellValue(v);
   if (cell === null) return "";
-  const s = String(cell);
-  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  // Normalize every flavour of in-field line break to CRLF. Excel for Mac
+  // famously respects quote-state for embedded CRLF but treats a *lone* LF
+  // as a hard row terminator even inside `"…"` — so a multi-line text field
+  // (Vietnamese poems, addresses, JSON blobs with `\n`) silently truncates
+  // the import. Forcing CRLF here keeps embedded line breaks visible
+  // *and* parseable.
+  const s = String(cell).replace(/\r\n|\r|\n/g, "\r\n");
+  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
   return s;
 }
 
 function rowsToCsv(fields: string[], rows: unknown[][]): string {
   const lines: string[] = [fields.map((f) => csvEscape(f)).join(",")];
   for (const r of rows) lines.push(r.map(csvEscape).join(","));
-  return lines.join("\n");
+  // CRLF per RFC4180. Excel for Mac in particular needs CRLF as the record
+  // terminator so it can tell a real row boundary apart from a literal `\n`
+  // embedded inside a quoted field — with LF-only files it often treats
+  // the embedded newline as a record break and truncates the import after
+  // a few thousand rows.
+  return lines.join("\r\n");
 }
 
 async function rowsToXlsx(

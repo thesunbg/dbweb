@@ -442,6 +442,19 @@ ul.tree { list-style: none; padding: 0; margin: 0; }
 .tree-row.leaf-row { color: var(--muted); }
 .tree-row.leaf-row:hover { color: var(--text); }
 
+/* Per-row overflow trigger — opens the same context menu as right-click,
+   exposing Export → JSON / CSV / Excel and other table actions to users
+   who don't think to right-click on a tree row. */
+.tree-row-menu {
+  margin-left: auto;
+  background: transparent; border: none; color: var(--text);
+  cursor: pointer; padding: 0 4px; font-size: 14px; line-height: 1;
+  opacity: 0; transition: opacity 80ms ease;
+}
+.tree-row:hover .tree-row-menu,
+.tree-row.active .tree-row-menu { opacity: 0.6; }
+.tree-row-menu:hover { opacity: 1 !important; color: var(--accent); }
+
 .tree-row .caret {
   width: 12px; flex-shrink: 0; color: var(--muted);
   font-size: 10px; line-height: 1;
@@ -494,6 +507,11 @@ ul.tree { list-style: none; padding: 0; margin: 0; }
   box-shadow: 0 6px 20px rgba(0,0,0,0.5);
   z-index: 200;
   font-size: 13px;
+  /* Hard ceiling for short viewports — if the JS clamp still can't fit the
+     whole menu (e.g. a very small window or large zoom), scroll inside
+     instead of letting items disappear below the viewport. */
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
 }
 .context-item {
   padding: 5px 16px; cursor: pointer; white-space: nowrap;

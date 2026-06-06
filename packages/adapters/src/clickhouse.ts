@@ -123,7 +123,9 @@ class ClickHouseAdapter implements DbAdapter {
   }
 
   async execute(statement: string, opts: ExecuteOptions = {}): Promise<QueryResult> {
-    const maxRows = opts.maxRows ?? 1000;
+    // Default cap matches the interactive editor's intent: show a preview,
+    // not the whole table. Callers that want more pass `maxRows` explicitly.
+    const maxRows = opts.maxRows ?? 50;
     const c = this.getClient();
     const start = performance.now();
 

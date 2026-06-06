@@ -376,7 +376,10 @@ export function Workbench({ connection }: Props) {
                       onClick={() =>
                         downloadText(
                           `${connection.name}-result.csv`,
-                          rowsToCsv(result.fields, result.rows),
+                          // UTF-8 BOM so Excel auto-detects the encoding
+                          // and Vietnamese / Unicode text renders cleanly
+                          // instead of MacRoman mojibake.
+                          "﻿" + rowsToCsv(result.fields, result.rows),
                           "text/csv",
                         )
                       }

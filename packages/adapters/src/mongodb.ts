@@ -104,8 +104,14 @@ class MongoAdapter implements DbAdapter {
         if (/wire version/i.test(msg)) {
           try {
             chosen = await tryConnect("legacy");
-          } catch {
-            throw err; // surface the modern wire-version message
+          } catch (legacyErr) {
+            // Both drivers failed. The modern message ("requires wire v8")
+            // is misleading once the user is already on a pre-4.2 server —
+            // they need the legacy driver's actual reason (typically an
+            // auth failure or missing authSource). Surface legacy's error,
+            // not modern's, since legacy is the line that can actually
+            // speak the server's wire version.
+            throw legacyErr;
           }
         } else {
           throw err;
@@ -206,8 +212,18 @@ class MongoAdapter implements DbAdapter {
    *   3) Bare collection name: dumps the collection with default limit.
    */
   async execute(statement: string, opts: ExecuteOptions = {}): Promise<QueryResult> {
-    const maxRows = opts.maxRows ?? 1000;
-    const defaultLimit = Math.min(50, maxRows);
+    // Default cap matches the interactive editor's intent: show a preview,
+    // not the whole collection. Callers that want more pass `maxRows`.
+    const maxRows = opts.maxRows ?? 50;
+    // Default-limit policy for an unannotated `db.coll.find()` cursor:
+    //  - Interactive editor (`maxRows` ≤ 1000): cap at maxRows so a stray
+    //    `db.events.find()` doesn't drag the whole collection into the UI.
+    //  - Export path (`maxRows` huge / MAX_SAFE_INTEGER): the caller really
+    //    wants every document, so skip auto-`.limit()` entirely. Passing a
+    //    sentinel like MAX_SAFE_INTEGER instead breaks the legacy
+    //    mongodb@3.7 driver, which sends the limit as int32 and silently
+    //    truncates to ~2k.
+    const defaultLimit: number | null = maxRows > 1000 ? null : maxRows;
     const start = performance.now();
     const { pkg } = await this.getClientAndDriver();
     const db = await this.db();

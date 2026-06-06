@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ConnectionConfig } from "@dbweb/shared-types";
 import { api } from "../api.js";
@@ -397,6 +397,22 @@ function NodeRow({
       <span className={`tree-icon i-${icon}`} />
       <span className="tree-label">{label}</span>
       {kindBadge && icon !== "table" && <span className={`badge kind-${kindBadge}`}>{kindBadge}</span>}
+      {/* Same actions as right-click, but discoverable via a hover-revealed
+          `⋯` trigger — most users don't know to right-click on a tree row,
+          and Export → Excel etc. used to be hidden behind that gesture. */}
+      {onContext && (
+        <button
+          type="button"
+          className="tree-row-menu"
+          title="More actions"
+          onClick={(e) => {
+            e.stopPropagation();
+            onContext(e);
+          }}
+        >
+          ⋯
+        </button>
+      )}
     </div>
   );
 }
@@ -628,10 +644,34 @@ function ContextMenu({ x, y, kind, collection, onPick, database }: ContextMenuPr
           { label: "Export → Excel (.xlsx)", action: { type: "export", database, table: collection, format: "xlsx" } },
         ];
 
+  // The Mongo flavor of this menu is ~14 items tall (~420px). Right-clicking
+  // anywhere in the lower half of a tall sidebar would push the bottom items
+  // — including Export → Excel — past the viewport bottom and out of view.
+  // Measure after mount, then clamp the position to keep the entire menu
+  // within the viewport (with a small inset for breathing room).
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState<{ left: number; top: number }>({ left: x, top: y });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const margin = 8;
+    let left = x;
+    let top = y;
+    if (left + rect.width > window.innerWidth - margin) {
+      left = Math.max(margin, window.innerWidth - rect.width - margin);
+    }
+    if (top + rect.height > window.innerHeight - margin) {
+      top = Math.max(margin, window.innerHeight - rect.height - margin);
+    }
+    if (left !== x || top !== y) setPos({ left, top });
+  }, [x, y]);
+
   return (
     <div
+      ref={ref}
       className="context-menu"
-      style={{ left: x, top: y }}
+      style={{ left: pos.left, top: pos.top }}
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.preventDefault()}
     >

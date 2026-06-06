@@ -16,10 +16,16 @@ import vm from "node:vm";
  * actually differs between modern and legacy. We use it to access
  * `ObjectId` for the user's expressions.
  */
+/**
+ * `defaultLimit = null` means "do not auto-`.limit()` an unannotated cursor"
+ * — used by the export path, which really does want every document. For
+ * interactive editor use, callers pass a small integer (typically 50) to
+ * avoid pulling huge collections into the workbench by accident.
+ */
 export async function runMongoShell(
   db: unknown,
   expression: string,
-  defaultLimit: number,
+  defaultLimit: number | null,
   driverPkg: { ObjectId: new (s?: string) => unknown },
 ): Promise<unknown> {
   const dbProxy = createDbProxy(db, defaultLimit);
@@ -46,8 +52,14 @@ export async function runMongoShell(
 
   // Auto-resolve cursor at top level. The caller didn't write `.toArray()`
   // so we resolve it here, applying default limit if they didn't ask.
+  // When `defaultLimit` is null we deliberately skip the auto-`.limit()` —
+  // passing a sentinel like `Number.MAX_SAFE_INTEGER` instead breaks the
+  // legacy mongodb@3.7 driver, which sends the limit as int32 and silently
+  // truncates huge values down to a few hundred docs.
   if (isCursorProxy(result)) {
-    if (!result.__userLimited) result.__cursor.limit(defaultLimit);
+    if (!result.__userLimited && defaultLimit != null) {
+      result.__cursor.limit(defaultLimit);
+    }
     return result.__cursor.toArray();
   }
   return result;
@@ -108,7 +120,7 @@ function wrapCursor(cursor: CursorProxy["__cursor"], userLimited = false): Curso
 type Db = any;
 type Collection = any;
 
-function wrapCollection(coll: Collection, defaultLimit: number) {
+function wrapCollection(coll: Collection, defaultLimit: number | null) {
   return {
     find: (q?: unknown, p?: unknown) =>
       wrapCursor(
@@ -163,7 +175,7 @@ function wrapCollection(coll: Collection, defaultLimit: number) {
   void defaultLimit;
 }
 
-function createDbProxy(db: Db, defaultLimit: number) {
+function createDbProxy(db: Db, defaultLimit: number | null) {
   // Reserved db-level methods. Anything else is treated as a collection name.
   // Stats / serverStatus / hostInfo are routed through db.command() because
   // the corresponding sugar methods were removed in mongodb v4+.
