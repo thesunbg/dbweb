@@ -53,4 +53,19 @@ function migrate(database: Database.Database): void {
       FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
     );
   `);
+
+  addColumn(database, "connections", "group_name", "TEXT");
+}
+
+/** SQLite has no ADD COLUMN IF NOT EXISTS — check the table shape first so
+ *  existing ~/.dbweb/dbweb.sqlite files migrate in place on startup. */
+function addColumn(
+  database: Database.Database,
+  table: string,
+  column: string,
+  decl: string,
+): void {
+  const cols = database.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (cols.some((c) => c.name === column)) return;
+  database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
 }

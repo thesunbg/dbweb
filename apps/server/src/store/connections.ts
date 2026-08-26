@@ -12,6 +12,7 @@ interface Row {
   username: string | null;
   password_cipher: string | null;
   database_name: string | null;
+  group_name: string | null;
   options: string | null;
   created_at: string;
   updated_at: string;
@@ -27,6 +28,7 @@ function rowToConfig(row: Row, password?: string): ConnectionConfig {
     username: row.username ?? undefined,
     password,
     database: row.database_name ?? undefined,
+    group: row.group_name,
     options: row.options ? (JSON.parse(row.options) as Record<string, unknown>) : undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -34,7 +36,11 @@ function rowToConfig(row: Row, password?: string): ConnectionConfig {
 }
 
 export async function listConnections(): Promise<ConnectionConfig[]> {
-  const rows = getDb().prepare<[], Row>("SELECT * FROM connections ORDER BY name").all();
+  // Grouped first (alphabetically), then loose ones — matches the sidebar's
+  // rendering order so the list doesn't jump around after a drag.
+  const rows = getDb()
+    .prepare<[], Row>("SELECT * FROM connections ORDER BY group_name IS NULL, group_name, name")
+    .all();
   // Public listing never includes secrets.
   return rows.map((r) => rowToConfig(r));
 }
@@ -54,8 +60,8 @@ export async function createConnection(input: ConnectionInput): Promise<Connecti
   getDb()
     .prepare(
       `INSERT INTO connections
-       (id, name, kind, host, port, username, password_cipher, database_name, options, created_at, updated_at)
-       VALUES (@id, @name, @kind, @host, @port, @username, @cipher, @database, @options, @now, @now)`,
+       (id, name, kind, host, port, username, password_cipher, database_name, group_name, options, created_at, updated_at)
+       VALUES (@id, @name, @kind, @host, @port, @username, @cipher, @database, @group, @options, @now, @now)`,
     )
     .run({
       id,
@@ -66,6 +72,7 @@ export async function createConnection(input: ConnectionInput): Promise<Connecti
       username: input.username ?? null,
       cipher,
       database: input.database ?? null,
+      group: normalizeGroup(input.group),
       options: input.options ? JSON.stringify(input.options) : null,
       now,
     });
@@ -88,6 +95,9 @@ export async function updateConnection(
     username: patch.username ?? existing.username,
     password: patch.password ?? existing.password,
     database: patch.database ?? existing.database,
+    // `??` can't clear a field — moving a connection back to "Ungrouped" sends
+    // group: null, which must survive the merge.
+    group: patch.group !== undefined ? patch.group : existing.group,
     options: patch.options ?? existing.options,
   };
   const cipher = merged.password ? await encrypt(merged.password) : null;
@@ -97,7 +107,8 @@ export async function updateConnection(
       `UPDATE connections SET
         name = @name, kind = @kind, host = @host, port = @port,
         username = @username, password_cipher = @cipher,
-        database_name = @database, options = @options, updated_at = @now
+        database_name = @database, group_name = @group,
+        options = @options, updated_at = @now
        WHERE id = @id`,
     )
     .run({
@@ -109,6 +120,7 @@ export async function updateConnection(
       username: merged.username ?? null,
       cipher,
       database: merged.database ?? null,
+      group: normalizeGroup(merged.group),
       options: merged.options ? JSON.stringify(merged.options) : null,
       now,
     });
@@ -133,8 +145,16 @@ export async function duplicateConnection(id: string): Promise<ConnectionConfig 
     username: src.username,
     password: src.password,
     database: src.database,
+    group: src.group,
     options: src.options,
   });
+}
+
+/** Trims and collapses "" to null so blank input never creates a phantom
+ *  group whose header renders as an empty string. */
+function normalizeGroup(group: string | null | undefined): string | null {
+  const trimmed = group?.trim();
+  return trimmed ? trimmed : null;
 }
 
 function uniqueCopyName(base: string, taken: Set<string>): string {

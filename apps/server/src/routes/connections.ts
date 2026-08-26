@@ -30,6 +30,8 @@ const connectionInputSchema = z.object({
   username: z.string().optional(),
   password: z.string().optional(),
   database: z.string().optional(),
+  // null moves a connection back to "Ungrouped".
+  group: z.string().max(64).nullable().optional(),
   options: z.record(z.unknown()).optional(),
 });
 

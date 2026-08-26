@@ -60,6 +60,50 @@ ul { list-style: none; padding: 0; margin: 0; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
+/* Filter box above the connection list. ⌘K focuses it from anywhere. */
+.conn-search {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0 6px; margin-bottom: 8px;
+}
+.conn-search:focus-within { border-color: var(--accent); }
+.conn-search-icon { color: var(--muted); font-size: 13px; }
+.conn-search input {
+  flex: 1; min-width: 0; background: transparent; border: none; outline: none;
+  color: var(--text); font-size: 13px; line-height: 26px;
+}
+.conn-search input::-webkit-search-cancel-button { display: none; }
+.conn-search-count { font-size: 11px; margin: -4px 0 6px 2px; }
+
+/* Group header. Doubles as the drop target for drag-to-file. */
+.conn-group-block + .conn-group-block { margin-top: 2px; }
+.conn-group {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 6px; margin-top: 4px; border-radius: 6px; cursor: pointer;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px;
+  color: var(--muted); user-select: none;
+  border: 1px dashed transparent;
+}
+.conn-group:hover { background: var(--panel-2); color: var(--text); }
+.conn-group.drop {
+  border-color: var(--accent); background: rgba(79, 140, 255, 0.12); color: var(--text);
+}
+.conn-group-caret { font-size: 9px; width: 8px; }
+.conn-group-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.conn-group-count {
+  background: var(--panel-2); border-radius: 999px;
+  padding: 0 6px; font-size: 10px; letter-spacing: 0;
+}
+.conn-item.dragging { opacity: 0.45; }
+
+/* Only visible while a row is being dragged. */
+.conn-dropzone {
+  margin-top: 8px; padding: 10px 8px; border-radius: 6px;
+  border: 1px dashed var(--border); color: var(--muted);
+  font-size: 12px; text-align: center;
+}
+.conn-dropzone.drop { border-color: var(--accent); color: var(--text); background: rgba(79, 140, 255, 0.12); }
+
 /* Overflow menu (⋯). Trigger is hidden by default and revealed on row
    hover or when the row is the active selection — this de-clutters the
    sidebar in its resting state. Once open, the trigger stays visible
@@ -149,6 +193,14 @@ button.ghost {
 button.ghost.icon { border: none; padding: 0 4px; opacity: 0.4; }
 button.ghost.icon:hover { opacity: 1; color: var(--error); }
 button.ghost:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Only rendered while Chrome says the PWA is installable — disappears once
+   dbweb runs in its own window. */
+button.ghost.install-app {
+  font-size: 11px; line-height: 20px; padding: 0 8px;
+  border-color: var(--accent); color: var(--accent);
+}
+button.ghost.install-app:hover { background: rgba(90, 140, 255, 0.12); }
 
 button.primary {
   background: var(--accent); color: #fff; border: none;

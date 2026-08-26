@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ConnectionConfig, ConnectionInput, DbKind } from "@dbweb/shared-types";
 import { api } from "../api.js";
 import { buildConnectionUrl, parseConnectionUrl } from "../lib/connection-url.js";
@@ -32,6 +32,7 @@ export function ConnectionForm({ editing, onClose }: Props) {
           username: editing.username ?? "",
           password: "",
           database: editing.database ?? "",
+          group: editing.group ?? "",
           options: editing.options,
         }
       : {
@@ -42,8 +43,20 @@ export function ConnectionForm({ editing, onClose }: Props) {
           username: "",
           password: "",
           database: "",
+          group: "",
         },
   );
+
+  // Already in cache — the sidebar keeps this query warm. Used to offer the
+  // existing group names as autocomplete instead of making the user retype.
+  const connections = useQuery({ queryKey: ["connections"], queryFn: api.listConnections });
+  const groupNames = [
+    ...new Set(
+      (connections.data ?? [])
+        .map((c) => c.group?.trim())
+        .filter((g): g is string => Boolean(g)),
+    ),
+  ].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
 
   const create = useMutation({
     mutationFn: (input: ConnectionInput) =>
@@ -83,6 +96,7 @@ export function ConnectionForm({ editing, onClose }: Props) {
       username: parsed.username ?? "",
       password: parsed.password ?? "",
       database: parsed.database ?? "",
+      group: f.group,
       options: parsed.options,
     }));
   };
@@ -186,14 +200,30 @@ export function ConnectionForm({ editing, onClose }: Props) {
             </label>
           </div>
 
-          <label>
-            <span>Database (optional)</span>
-            <input
-              value={form.database ?? ""}
-              onChange={(e) => setForm({ ...form, database: e.target.value })}
-              placeholder="leave blank to choose later"
-            />
-          </label>
+          <div className="row">
+            <label className="grow">
+              <span>Database (optional)</span>
+              <input
+                value={form.database ?? ""}
+                onChange={(e) => setForm({ ...form, database: e.target.value })}
+                placeholder="leave blank to choose later"
+              />
+            </label>
+            <label className="grow">
+              <span>Group (optional)</span>
+              <input
+                list="dbweb-groups"
+                value={form.group ?? ""}
+                onChange={(e) => setForm({ ...form, group: e.target.value })}
+                placeholder="Coolify, Production…"
+              />
+              <datalist id="dbweb-groups">
+                {groupNames.map((g) => (
+                  <option key={g} value={g} />
+                ))}
+              </datalist>
+            </label>
+          </div>
 
           {/* Reverse URL preview — what this connection looks like as an env var.
               Helps double-check that the form mirrors the pasted URL. */}

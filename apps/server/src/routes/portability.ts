@@ -28,6 +28,9 @@ interface BundleEntry {
   username?: string;
   password?: string;
   database?: string;
+  /** Added after v1 shipped — bundles written before that simply lack it and
+   *  import as ungrouped. */
+  group?: string | null;
   options?: Record<string, unknown>;
 }
 
@@ -62,6 +65,7 @@ export async function portabilityRoutes(app: FastifyInstance): Promise<void> {
         username: full.username,
         password: full.password,
         database: full.database,
+        group: full.group,
         options: full.options,
       });
     }
@@ -115,6 +119,7 @@ export async function portabilityRoutes(app: FastifyInstance): Promise<void> {
         username: entry.username,
         password: entry.password,
         database: entry.database,
+        group: entry.group ?? null,
         options: entry.options,
       });
       imported += 1;

@@ -74,12 +74,61 @@ pnpm -w run dev:web
 
 Open [http://127.0.0.1:4318](http://127.0.0.1:4318).
 
-Production build:
+Production run (single process — Fastify serves the API *and* the built web bundle
+from `apps/web/dist`, so 4318 is not needed):
 
 ```bash
 pnpm build
-pnpm --filter @dbweb/server start    # serves the built server (node dist/index.js)
+pnpm serve                           # http://127.0.0.1:4317
 ```
+
+## Install as a desktop app (macOS + Chrome)
+
+One command builds everything, registers a LaunchAgent so the server is always
+running (starts at login, restarts if it crashes), and opens Chrome:
+
+```bash
+pnpm app:install
+```
+
+Then in the Chrome window that opens, click **⤓ Install** in the dbweb sidebar
+(or Chrome's ⋮ menu → *Cast, Save and Share* → *Install page as app…*). dbweb
+gets its own window + Dock/Launchpad icon and no longer needs `pnpm dev`.
+
+| Command | What it does |
+|---|---|
+| `pnpm app:install` | Build + install/refresh the LaunchAgent + launcher + open Chrome |
+| `pnpm app:status` | Is the background server up? |
+| `pnpm app:restart` | Rebuild after code changes and bounce the service |
+| `pnpm app:stop` | Stop it — frees port 4317 so `pnpm dev` can use it |
+| `pnpm app:start` | Start it again |
+| `pnpm app:logs` | `tail -f ~/.dbweb/logs/server.log` |
+| `pnpm app:launcher` | Rebuild `~/Applications/dbweb.app` only |
+| `pnpm app:uninstall` | Remove the LaunchAgent + launcher (data in `~/.dbweb` untouched) |
+
+### Idle shutdown
+
+The LaunchAgent sets `DBWEB_IDLE_EXIT_MIN=20`, so the server quits itself after
+20 minutes with no requests (in-flight requests hold it open — a long export is
+never cut short). It frees ~50MB and closes every pooled DB connection.
+
+Waking it back up is what `~/Applications/dbweb.app` is for: it starts the
+service, waits for `/api/health`, then opens the app window. **Launch dbweb from
+that icon** (drag it to the Dock) rather than from the Chrome PWA icon, which
+can't start a stopped server. Override the timeout with
+`DBWEB_IDLE_EXIT_MIN=60 pnpm app:install`, or `0` to keep it running forever.
+
+Notes:
+
+- The background service and `pnpm dev:server` both want port 4317 — run
+  `pnpm app:stop` before a dev session.
+- The installed app serves the **built** bundle. After changing code run
+  `pnpm app:restart`, or use `pnpm dev` on 4318 as usual while developing.
+- The service picks Node 22 (then 20) out of `~/.nvm` — never Node 21, which has
+  no `better-sqlite3` / `keytar` prebuilds.
+- A service worker (`apps/web/public/sw.js`) caches the app shell only; `/api`
+  responses are never cached. Monaco still loads from the jsDelivr CDN, so the
+  SQL editor needs internet on first load after a build.
 
 ## Where data lives
 
@@ -112,6 +161,8 @@ The **master encryption key** lives in the **macOS Keychain** by default (servic
 | `DBWEB_PORT` | `4317` | API server port (web dev port is 4318) |
 | `DBWEB_DATA_DIR` | `~/.dbweb` | Where SQLite + vault are stored |
 | `DBWEB_FILE_VAULT` | unset | Set to `1` to use a file-based vault instead of the OS Keychain |
+| `DBWEB_IDLE_EXIT_MIN` | `0` (off) | Minutes of inactivity before the server exits by itself. The LaunchAgent sets `20`; `pnpm dev` leaves it off |
+| `DBWEB_WEB_DIR` | auto | Override the folder served as the web UI (defaults to `apps/web/dist` next to the server) |
 
 ## Features
 
@@ -127,6 +178,19 @@ The **master encryption key** lives in the **macOS Keychain** by default (servic
 | Redis | `ioredis` | 6379 | 4+ | ✓ | — |
 | Dragonfly | `ioredis` (Redis-compat) | 6379 | 1.x+ | ✓ | — |
 | ClickHouse | `@clickhouse/client` (HTTP) | 8123 | 22+ / 25+ / 26+ | ✓ | — (mutations are async; use `ALTER TABLE … UPDATE` from the workbench) |
+
+### Connection sidebar
+
+- **Filter**: `⌘K` / `Ctrl-K` focuses the search box; every whitespace-separated
+  term must match somewhere in the connection (name, kind, host, port, database,
+  username, group), so `co my` finds `coolify-mysql`. `Esc` clears it.
+- **Groups**: drag a connection onto a group header to file it there, or onto the
+  “＋ Thả vào đây để tạo group mới” zone that appears mid-drag to create one.
+  Drop on **Ungrouped** to take it back out. Click a header to collapse (kept in
+  `localStorage`), double-click to rename the group everywhere.
+- Groups are just a `group` column on the connection — no group table — so a
+  group exists exactly as long as something is in it. Export bundles carry it;
+  bundles made before this feature import as ungrouped.
 
 ### Workbench
 

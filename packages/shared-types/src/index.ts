@@ -18,6 +18,10 @@ export interface ConnectionConfig {
   /** Stored encrypted at rest; never sent to the browser in clear text. */
   password?: string;
   database?: string;
+  /** Optional folder the sidebar files this connection under. null/undefined
+   *  means "Ungrouped". Groups are derived from this field — there is no
+   *  separate group table, so a group exists exactly while something is in it. */
+  group?: string | null;
   /** Free-form options per driver (sslMode, authSource, tls, ...). */
   options?: Record<string, unknown>;
   createdAt: string;

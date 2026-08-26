@@ -11,6 +11,14 @@ const queryClient = new QueryClient({
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("#root not found");
 
+// Service worker only exists in the production bundle served by the Fastify
+// server (port 4317) — that origin is what gets installed as the Chrome app.
+if ("serviceWorker" in navigator && import.meta.env.PROD) {
+  window.addEventListener("load", () => {
+    void navigator.serviceWorker.register("/sw.js");
+  });
+}
+
 createRoot(rootEl).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
