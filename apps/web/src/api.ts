@@ -1,10 +1,16 @@
 import type {
+  AlertDto,
   ApiResult,
+  BackupFileDto,
+  BackupJobDto,
   ConnectionConfig,
   ConnectionInput,
   QueryHistoryEntry,
   QueryResultDto,
+  RelationDto,
+  ScheduleDto,
   SchemaObjectDto,
+  SnippetDto,
 } from "@dbweb/shared-types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -19,6 +25,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!json.ok) throw new Error(json.error.message);
   return json.data;
 }
+
+export type ScheduleInput = Omit<ScheduleDto, "id" | "createdAt" | "lastRunAt" | "lastStatus" | "lastMessage">;
 
 export interface PingResult {
   latencyMs: number;
@@ -55,6 +63,12 @@ export const api = {
 
   testConnection: (id: string) =>
     request<PingResult>(`/api/connections/${id}/test`, { method: "POST" }),
+  /** Probe an unsaved form config. Pass `id` while editing so a blank
+   *  password falls back to the stored secret. */
+  testConfig: (input: ConnectionInput & { id?: string }) =>
+    request<PingResult>("/api/connections/test", { method: "POST", body: JSON.stringify(input) }),
+  disconnect: (id: string) =>
+    request<{ id: string }>(`/api/connections/${id}/disconnect`, { method: "POST" }),
   connectionUrl: (id: string) =>
     request<{ url: string }>(`/api/connections/${id}/url`),
   listDatabases: (id: string) =>
@@ -67,11 +81,21 @@ export const api = {
     request<ColumnInfoDto[]>(
       `/api/connections/${id}/databases/${encodeURIComponent(database)}/objects/${encodeURIComponent(name)}`,
     ),
-  execute: (id: string, statement: string, database?: string) =>
+  execute: (id: string, statement: string, database?: string, maxRows?: number, extra?: { requestId?: string; transactionId?: string }) =>
     request<QueryResultDto>(`/api/connections/${id}/execute`, {
       method: "POST",
-      body: JSON.stringify({ statement, database }),
+      body: JSON.stringify({ statement, database, maxRows, ...extra }),
     }),
+  cancel: (id: string, requestId: string) =>
+    request<{ cancelled: boolean }>(`/api/connections/${id}/cancel`, { method: "POST", body: JSON.stringify({ requestId }) }),
+  txBegin: (id: string, database?: string) =>
+    request<{ transactionId: string }>(`/api/connections/${id}/tx/begin`, { method: "POST", body: JSON.stringify({ database }) }),
+  txCommit: (id: string, transactionId: string) =>
+    request<{ transactionId: string }>(`/api/connections/${id}/tx/commit`, { method: "POST", body: JSON.stringify({ transactionId }) }),
+  txRollback: (id: string, transactionId: string) =>
+    request<{ transactionId: string }>(`/api/connections/${id}/tx/rollback`, { method: "POST", body: JSON.stringify({ transactionId }) }),
+  relations: (id: string, database: string) =>
+    request<RelationDto[]>(`/api/connections/${id}/databases/${encodeURIComponent(database)}/relations`),
   history: (id: string) =>
     request<QueryHistoryEntry[]>(`/api/connections/${id}/history`),
 
@@ -135,6 +159,54 @@ export const api = {
     if (limit) params.set("limit", String(limit));
     return `/api/connections/${id}/export?${params.toString()}`;
   },
+
+  // ---- Settings & AI ----
+  settings: () => request<{ aiConfigured: boolean; aiKeySource: "settings" | "env" | null; aiModel: string }>("/api/settings"),
+  saveSettings: (patch: { anthropicApiKey?: string | null; aiModel?: string | null }) =>
+    request<{ saved: boolean }>("/api/settings", { method: "PUT", body: JSON.stringify(patch) }),
+  ai: (body: { task: "generate" | "explain" | "fix" | "optimize"; connectionId: string; database?: string; prompt?: string; statement?: string; error?: string }) =>
+    request<{ text: string; code?: string; model: string }>("/api/ai", { method: "POST", body: JSON.stringify(body) }),
+
+  // ---- Snippets ----
+  listSnippets: () => request<SnippetDto[]>("/api/snippets"),
+  createSnippet: (body: { name: string; statement: string; kind?: SnippetDto["kind"] }) =>
+    request<SnippetDto>("/api/snippets", { method: "POST", body: JSON.stringify(body) }),
+  updateSnippet: (id: string, body: Partial<{ name: string; statement: string; kind: SnippetDto["kind"] }>) =>
+    request<SnippetDto>(`/api/snippets/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteSnippet: (id: string) => request<{ id: string }>(`/api/snippets/${id}`, { method: "DELETE" }),
+
+  // ---- Schedules & alerts ----
+  listSchedules: (connectionId?: string) =>
+    request<ScheduleDto[]>(`/api/schedules${connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : ""}`),
+  createSchedule: (body: ScheduleInput) => request<ScheduleDto>("/api/schedules", { method: "POST", body: JSON.stringify(body) }),
+  updateSchedule: (id: string, body: Partial<ScheduleInput>) =>
+    request<ScheduleDto>(`/api/schedules/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteSchedule: (id: string) => request<{ id: string }>(`/api/schedules/${id}`, { method: "DELETE" }),
+  runSchedule: (id: string) =>
+    request<{ status: string; message: string; schedule: ScheduleDto }>(`/api/schedules/${id}/run`, { method: "POST" }),
+  listAlerts: () => request<AlertDto[]>("/api/alerts"),
+  markAlertsRead: (ids?: string[]) => request<{ read: boolean }>("/api/alerts/read", { method: "POST", body: JSON.stringify({ ids }) }),
+  clearAlerts: () => request<{ cleared: boolean }>("/api/alerts", { method: "DELETE" }),
+
+  // ---- Backups ----
+  listBackups: (connectionId?: string) =>
+    request<{ files: BackupFileDto[]; jobs: BackupJobDto[] }>(`/api/backups${connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : ""}`),
+  backupTools: (id: string) =>
+    request<{ supported: boolean; backup?: { tool: string; available: boolean }; restore?: { tool: string; available: boolean } }>(`/api/connections/${id}/backup-tools`),
+  startBackup: (id: string, database: string) =>
+    request<BackupJobDto>(`/api/connections/${id}/backup`, { method: "POST", body: JSON.stringify({ database }) }),
+  startRestore: (id: string, database: string, file: string) =>
+    request<BackupJobDto>(`/api/connections/${id}/restore`, { method: "POST", body: JSON.stringify({ database, file }) }),
+  deleteBackup: (file: string) => request<{ file: string }>(`/api/backups/${encodeURIComponent(file)}`, { method: "DELETE" }),
+
+  // ---- Import ----
+  parseImport: (name: string, data: string, limit?: number, delimiter?: string) =>
+    request<{ columns: string[]; rows: unknown[][]; totalRows: number }>("/api/import/parse", {
+      method: "POST",
+      body: JSON.stringify({ name, data, limit, delimiter }),
+    }),
+  importRows: (id: string, body: { database: string; table: string; columns: string[]; rows: unknown[][] }) =>
+    request<{ inserted: number }>(`/api/connections/${id}/import`, { method: "POST", body: JSON.stringify(body) }),
 
   exportConfigs: (passphrase: string, ids?: string[]) =>
     request<{ payload: string; count: number }>("/api/portability/export", {

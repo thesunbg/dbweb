@@ -71,13 +71,12 @@ Concrete checklist — drift here causes compile errors at the leaves first.
 4. **`packages/adapters/package.json`** → add the driver dep (`pnpm --filter @dbweb/adapters add <pkg>`).
 5. **`apps/server/src/routes/connections.ts`** → extend `dbKindSchema` (zod enum) AND `KIND_TO_SCHEME`.
 6. **`apps/server/src/routes/export.ts`** → handle the new kind in `buildSelectAll` (or short-circuit if not exportable, e.g. KV stores).
-7. **Web — five files keyed by `DbKind`. TypeScript will catch missed entries:**
-   - `apps/web/src/App.tsx` → `KIND_GLYPH` (2-char badge)
+7. **Web — files keyed by `DbKind`. TypeScript will catch missed entries:**
+   - `apps/web/src/lib/kinds.ts` → `KIND_LABEL` (2-char glyph, label, default port) + `KIND_ORDER` (form `<select>` / empty-state order)
    - `apps/web/src/lib/connection-url.ts` → `SCHEME_TO_KIND`, `KIND_TO_SCHEME`, `DEFAULT_PORTS`
-   - `apps/web/src/components/ConnectionForm.tsx` → `DEFAULT_PORTS` + `<option>` in the kind `<select>`
+   - `apps/web/src/lib/sql.ts` → `SQL_KINDS`, `quoteIdent`, `tableRef`, `buildSelect` (paging syntax), `buildShowColumns`, `buildShowCreate`, `buildExplain`, `formatterDialect`
    - `apps/web/src/components/Workbench.tsx` → `STARTERS` (placeholder text) + `LANGUAGES` (monaco lang)
-   - `apps/web/src/components/TableBrowser.tsx` → `QUOTE` identifier-quoter
-   - `apps/web/src/components/DbTree.tsx` → kind branches in `defaultActivate`, `buildShowColumns`, `HostContextMenu`
+   - `apps/web/src/components/DbTree.tsx` → kind branches in `defaultActivate`, `hostMenuItems`, `itemMenuItems`
 8. **`apps/web/src/styles.css`** → add `.kind-<kind>` color class (badge background/foreground).
 
 Two completed examples to cargo-cult:
@@ -91,6 +90,53 @@ Two completed examples to cargo-cult:
 - **MySQL information_schema** returns column names in upper-case on 8.x default builds. Always alias (`SELECT column_name AS col_name …`) and read the lower-case alias. Same trap for `getStats` and `describeObject`.
 - **MongoDB** ships two drivers side-by-side (modern `mongodb@6` + legacy `mongodb@3.7`). The dispatcher tries modern first, falls back on wire-version mismatch. Don't add code that assumes a single driver.
 - **ClickHouse inline edit** is intentionally absent — `ALTER … UPDATE` is async, no synchronous affected-row count, so the route returns 501 NOT_SUPPORTED and `TableBrowser` hides the edit affordance via `connection.kind !== "clickhouse"`.
+
+## Per-call database context
+
+`ExecuteOptions.database` (adapters `types.ts`) lets the editor run against the DB
+selected in the tree / the toolbar `DB` dropdown without a separate connection.
+Postgres picks the per-database pool, MySQL issues `USE` on the borrowed
+connection, MSSQL prefixes `USE [db];`, Mongo resolves `db.` to that database.
+ClickHouse / Redis ignore it. The `/execute` route forwards `body.database`;
+the table browser always fully qualifies names via `tableRef()` so it never
+depends on this.
+
+## Connection color
+
+`ConnectionConfig.color` (`connections.color`, nullable, added with `addColumn`)
+is a purely cosmetic environment accent — red = Production etc., labels in
+`lib/kinds.ts COLOR_LABEL`. It renders as a left stripe on the sidebar row, a
+top stripe + pill on the workbench toolbar, and a rail marker when the sidebar
+is collapsed. Never pass it to drivers (adapters spread `options` into driver
+config, which is why this is its own column and not an `options` key).
+
+`POST /api/connections/test` probes an *unsaved* form config (throwaway
+adapter, never pooled). Send `id` while editing so a blank password falls back
+to the stored secret.
+
+## Advanced features (where things live)
+
+| Feature | Server | Web |
+|---|---|---|
+| Read-only connections | `services/sql-guard.ts` `findWriteKeyword()` — gate in `/execute`, `/row`, `/document`, `/import`, `/restore`, `/tx/begin` (403 `READ_ONLY`) | `connection.readOnly` hides edit affordances; lock badge |
+| Cancel query | `/execute` takes `requestId`; `/cancel` aborts the `AbortController`. pg → `pg_cancel_backend`, mysql → `KILL QUERY`; others just release the HTTP request | Run button turns into ■ Cancel while running |
+| Transactions | `/tx/begin|commit|rollback`; adapters `beginTransaction/commit/rollback` pin a client (pg, mysql). Open tx keeps the adapter alive via `touchAdapter` | "⎔ Begin tx" → tx bar with Commit / Rollback; unmount rolls back |
+| AI assistant | `services/ai.ts` (`@anthropic-ai/sdk`, model from settings, default `claude-opus-5`), schema context cached 5 min; key stored encrypted in `settings` table or `ANTHROPIC_API_KEY` | `AiPanel` (⌘⇧I), `SettingsModal` |
+| Import CSV/XLSX | `/import/parse` (exceljs + RFC4180 parser) and `/connections/:id/import` → `adapter.insertRows` (pg, mysql, mongo) or literal multi-row INSERT (`services/dialect.ts`) | `ImportModal` (Tools menu / browser "↥ Import") |
+| Charts | — | `ResultChart` (pure SVG, CVD-safe palette from the dataviz skill) |
+| ER diagram | `/databases/:db/relations` → `adapter.listRelations` (pg, mysql, mssql) | `ErDiagram` (mermaid, lazy-loaded) |
+| SSH tunnel | `services/tunnel.ts` (ssh2 local forward); `adapter-pool.openAdapter()` rewrites host/port to the tunnel. `ssh` JSON stored encrypted in `connections.ssh_cipher`; secrets stripped from public listings | `ConnectionForm` SSH section |
+| Query params | — | `lib/params.ts`: `:name` (quoted literal, SQL only) / `{{name}}` (raw); values remembered per connection |
+| Snippets | `store/snippets.ts`, `/api/snippets` | `SnippetsModal` (status bar / Tools) |
+| Compare | — | `CompareModal` + `lib/schema-index.ts describeAll()` (also used by ER + search) |
+| Schema search | — | `SchemaSearch` (⌘⇧F) |
+| Slow-query dashboard | — | `lib/insights.ts` per-kind statements rendered on the Stats tab |
+| Backups | `services/backups.ts` spawns pg_dump/mysqldump/mongodump; files + `.json` sidecar in `~/.dbweb/backups`; jobs in memory | `BackupsModal` |
+| Schedules & alerts | `services/scheduler.ts` (30s tick, interval or croner), `store/schedules.ts`; alerts + `osascript` notification. `hasActiveSchedules()` suppresses idle-exit | `SchedulesModal`, `AlertsPopover` bell |
+
+Gotchas: Fastify `bodyLimit` is 256MB for imports. `pg_dump` must be ≥ the server
+version (Homebrew `postgresql@18` for an 18.x server). Route order matters:
+`/api/connections/test` is declared before `/api/connections/:id/*`.
 
 ## Connection groups
 
@@ -114,6 +160,22 @@ carries the name, which is why renaming a group patches every member
 - **Per-connection export**: the `/api/portability/export` body takes an optional `ids: string[]` allow-list. Present → bundle only those connections; absent → bundle all (the sidebar `⇅` bulk flow). `PortabilityModal` takes a `scope?: { id, name }` prop — scoped mode hides the Import tab and passes `[scope.id]`. Import is unchanged: it accepts any `DBWEB1:` bundle of 1 or N entries.
 
 ## Frontend conventions
+
+- **No native dialogs.** `alert/confirm/prompt` are gone — use `toast.*`,
+  `confirmDialog()`, `promptDialog()` and `copyText()` from `lib/ui.tsx`
+  (`<UiHost/>` is mounted once in `App`). All modals wrap `<Modal>` from the
+  same file, which handles Escape + backdrop click.
+- **Every result table goes through `ResultGrid`** (row numbers, NULL styling,
+  sort, cell inspector, right-click copy menu, optional double-click editing).
+  Don't render a bare `<table className="result-table">`.
+- **Workbench tabs** are persisted per connection under `dbweb:tabs:<id>` —
+  query tabs keep their statement, browse tabs their db/table. Tree actions
+  reuse the active tab only while it still holds an untouched auto-inserted
+  statement (`tab.auto`); otherwise they open a new tab.
+- Theme lives in `lib/theme.ts` (`data-theme` on `<html>`, tokens in
+  `styles.css`). Monaco instances must take `useTheme().monacoTheme`.
+- `lib/prefs.ts` is the localStorage wrapper; legacy `"1"/"0"` flags
+  (`sidebarCollapsed`, `treeCollapsed`) still use `readFlag/writeFlag`.
 
 - Per-connection actions (Copy URL / Edit / Duplicate / Export… / Delete) live behind a single `⋯` overflow menu (`ConnMenu` in `App.tsx`). When adding a new connection-level action, add it to that menu, not inline next to the row.
 - Long connection names use `text-overflow: ellipsis` — every `.conn-item` is fixed 36px height. Don't reintroduce per-row icons that break the alignment.

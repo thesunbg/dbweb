@@ -1,14 +1,39 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { getAdapter, dropAdapter } from "../services/adapter-pool.js";
+import { nanoid } from "nanoid";
+import { getAdapter, dropAdapter, touchAdapter } from "../services/adapter-pool.js";
 import { listHistory, recordQuery } from "../store/history.js";
 import { createSaved, deleteSaved, listSaved } from "../store/saved.js";
+import { getConnection } from "../store/connections.js";
+import { findWriteKeyword } from "../services/sql-guard.js";
 
 const executeSchema = z.object({
   statement: z.string().min(1),
   database: z.string().optional(),
   maxRows: z.number().int().positive().max(50000).optional(),
+  /** Client-generated id so the statement can be cancelled mid-flight. */
+  requestId: z.string().max(64).optional(),
+  transactionId: z.string().max(64).optional(),
 });
+
+/** In-flight executes keyed by requestId, for /cancel. */
+const inflight = new Map<string, AbortController>();
+
+/** Open transactions: txId → connection, so commit/rollback route correctly
+ *  and the pool reaper is told to leave the adapter alone. */
+const transactions = new Map<string, { connectionId: string; startedAt: number }>();
+setInterval(() => {
+  for (const t of transactions.values()) touchAdapter(t.connectionId);
+}, 60_000).unref();
+
+/** Shared read-only gate for every write path. */
+async function readOnlyBlock(id: string, statement?: string): Promise<string | null> {
+  const conn = await getConnection(id);
+  if (!conn?.readOnly) return null;
+  if (statement === undefined) return "Connection is read-only";
+  const kw = findWriteKeyword(conn.kind, statement);
+  return kw ? `Connection is read-only — ${kw} is blocked. Turn off "Read-only" in the connection settings to allow writes.` : null;
+}
 
 const updateRowSchema = z.object({
   database: z.string().min(1),
@@ -84,14 +109,34 @@ export async function dbRoutes(app: FastifyInstance): Promise<void> {
         .send({ ok: false, error: { code: "BAD_INPUT", message: parsed.error.message } });
     }
 
+    const blocked = await readOnlyBlock(id, parsed.data.statement);
+    if (blocked) return reply.code(403).send({ ok: false, error: { code: "READ_ONLY", message: blocked } });
+
+    const controller = new AbortController();
+    const requestId = parsed.data.requestId;
+    if (requestId) inflight.set(requestId, controller);
+
     let result;
     let error: string | undefined;
+    let cancelled = false;
     try {
       const adapter = await getAdapter(id);
-      // Future: per-call USE database. For now we rely on the pool's default db.
-      result = await adapter.execute(parsed.data.statement, { maxRows: parsed.data.maxRows });
+      const run = adapter.execute(parsed.data.statement, {
+        maxRows: parsed.data.maxRows,
+        database: parsed.data.database,
+        signal: controller.signal,
+        transactionId: parsed.data.transactionId,
+      });
+      // Adapters that can't interrupt the driver still return promptly: the
+      // abort rejects here while the DB finishes on its own.
+      const aborted = new Promise<never>((_, rej) => controller.signal.addEventListener("abort", () => rej(new Error("Cancelled")), { once: true }));
+      result = await Promise.race([run, aborted]);
+      run.catch(() => undefined);
     } catch (err) {
       error = (err as Error).message;
+      cancelled = controller.signal.aborted;
+    } finally {
+      if (requestId) inflight.delete(requestId);
     }
 
     recordQuery({
@@ -104,9 +149,67 @@ export async function dbRoutes(app: FastifyInstance): Promise<void> {
     });
 
     if (error) {
-      return reply.code(400).send({ ok: false, error: { code: "EXECUTE_FAILED", message: error } });
+      return reply.code(400).send({ ok: false, error: { code: cancelled ? "CANCELLED" : "EXECUTE_FAILED", message: cancelled ? "Query cancelled" : error } });
     }
     return { ok: true, data: result };
+  });
+
+  app.post("/api/connections/:id/cancel", async (req) => {
+    const { requestId } = (req.body ?? {}) as { requestId?: string };
+    const ctl = requestId ? inflight.get(requestId) : undefined;
+    if (ctl) ctl.abort();
+    return { ok: true, data: { cancelled: !!ctl } };
+  });
+
+  // ---- Explicit transactions -------------------------------------------
+  app.post("/api/connections/:id/tx/begin", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { database } = (req.body ?? {}) as { database?: string };
+    const blocked = await readOnlyBlock(id);
+    if (blocked) return reply.code(403).send({ ok: false, error: { code: "READ_ONLY", message: blocked } });
+    try {
+      const adapter = await getAdapter(id);
+      if (!adapter.beginTransaction) {
+        return reply.code(501).send({ ok: false, error: { code: "NOT_SUPPORTED", message: `Explicit transactions are not supported for ${adapter.kind}` } });
+      }
+      const txId = nanoid(10);
+      await adapter.beginTransaction(txId, database);
+      transactions.set(txId, { connectionId: id, startedAt: Date.now() });
+      return { ok: true, data: { transactionId: txId } };
+    } catch (err) {
+      return reply.code(400).send({ ok: false, error: { code: "TX_FAILED", message: (err as Error).message } });
+    }
+  });
+
+  for (const action of ["commit", "rollback"] as const) {
+    app.post(`/api/connections/:id/tx/${action}`, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const { transactionId } = (req.body ?? {}) as { transactionId?: string };
+      if (!transactionId || transactions.get(transactionId)?.connectionId !== id) {
+        return reply.code(404).send({ ok: false, error: { code: "NOT_FOUND", message: "Unknown transaction" } });
+      }
+      try {
+        const adapter = await getAdapter(id);
+        if (action === "commit") await adapter.commitTransaction?.(transactionId);
+        else await adapter.rollbackTransaction?.(transactionId);
+        transactions.delete(transactionId);
+        return { ok: true, data: { transactionId } };
+      } catch (err) {
+        transactions.delete(transactionId);
+        return reply.code(400).send({ ok: false, error: { code: "TX_FAILED", message: (err as Error).message } });
+      }
+    });
+  }
+
+  app.get("/api/connections/:id/databases/:database/relations", async (req, reply) => {
+    const { id, database } = req.params as { id: string; database: string };
+    try {
+      const adapter = await getAdapter(id);
+      const items = adapter.listRelations ? await adapter.listRelations(database) : [];
+      return { ok: true, data: items };
+    } catch (err) {
+      return reply.code(400).send({ ok: false, error: { code: "QUERY_FAILED", message: (err as Error).message } });
+    }
   });
 
   app.get("/api/connections/:id/history", async (req) => {
@@ -138,6 +241,8 @@ export async function dbRoutes(app: FastifyInstance): Promise<void> {
         .code(400)
         .send({ ok: false, error: { code: "BAD_INPUT", message: "database, collection, doc required" } });
     }
+    const blocked = await readOnlyBlock(id);
+    if (blocked) return reply.code(403).send({ ok: false, error: { code: "READ_ONLY", message: blocked } });
     try {
       const adapter = await getAdapter(id);
       // We narrow at the route level — only the Mongo adapter implements
@@ -167,6 +272,8 @@ export async function dbRoutes(app: FastifyInstance): Promise<void> {
         .code(400)
         .send({ ok: false, error: { code: "BAD_INPUT", message: parsed.error.message } });
     }
+    const blocked = await readOnlyBlock(id);
+    if (blocked) return reply.code(403).send({ ok: false, error: { code: "READ_ONLY", message: blocked } });
     try {
       const adapter = await getAdapter(id);
       if (!adapter.updateRow) {

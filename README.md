@@ -194,13 +194,17 @@ The **master encryption key** lives in the **macOS Keychain** by default (servic
 
 ### Workbench
 
-- **Editor**: Monaco with kind-aware syntax highlighting (SQL / JSON / shell). `Cmd/Ctrl + Enter` runs the query — works even when the editor is focused, because the binding is registered through `editor.addCommand`.
-- **Result toggle**: Table view (default) or JSON view (Monaco read-only with fold/unfold).
-- **Resizable**: drag the divider between editor and result to adjust the split. Persisted to localStorage.
-- **Browse tab** (SQL): table viewer with per-column filter builder (`= != > < >= <= LIKE IS NULL`), pagination, in-place cell editing keyed by primary key, save per row.
-- **Stats tab**: cards (size, table count, query count, average latency), 14-day query histogram, top 5 slowest queries, top 10 largest tables.
-- **History tab**: two sections — Saved queries (named, click to load) and History (every executed statement with status ✓/✕, elapsed time, row count, timestamp).
-- **Export**: query result → CSV (RFC 4180-compliant) or JSON download.
+- **Tabs**: any number of query tabs (`+`, `⌥⌘T`) plus one browse tab per table; tabs and their statements are remembered per connection. Double-click a tab to rename, middle-click to close.
+- **Editor**: Monaco with kind-aware syntax highlighting (SQL / JavaScript for Mongo shell / shell). `⌘/Ctrl + Enter` runs the query, or **only the highlighted selection** when there is one. Table and column names autocomplete from whatever the tree has already loaded. `⌁ Format` (sql-formatter) and `◈ Explain` (opens the plan in a new tab) for SQL engines.
+- **DB selector + row cap**: the toolbar `DB` dropdown decides which database the statement runs against; `rows` caps the result (50 → 20 000) so large queries don't stall the browser.
+- **Result grid**: row numbers, dimmed `NULL`s, click-to-sort headers, a cell inspector strip (full value of the selected cell, `Open ↗` for JSON / long text), keyboard navigation, and a right-click menu (copy cell / row as JSON / CSV / INSERT, set NULL, delete row).
+- **Result toggle**: Table view (default) or JSON view (Monaco read-only with fold/unfold). `↓ Export…` downloads or copies CSV / JSON.
+- **Resizable**: sidebar, schema tree and editor/result split are all draggable; sizes persist.
+- **Browse tab** (SQL): server-side paging with total count, click-to-sort columns, filter builder (`= != > < >= <= LIKE NOT LIKE IN IS NULL`), double-click cell editing with one **Save n rows** commit, row delete, `+ Row` INSERT template, `≡ SQL` to open the current query in the editor, export this page or the whole table (CSV / JSON / Excel).
+- **Connection banner**: when the ping fails the workbench shows the error with **Retry** and **Edit connection** instead of silently disabling everything. `⟳` next to the status drops the pooled adapter and reconnects.
+- **Stats tab**: cards (size, table count, query count, average latency), 14-day query histogram, slowest queries, top 10 largest tables.
+- **History tab**: searchable — Saved queries (named, copy / delete) and every executed statement with status ✓/✕, elapsed time, row count, timestamp; click opens it in a new tab.
+- **Theme**: dark (default) or light, toggled from the status bar.
 
 ### Robo3T-style tree view
 
@@ -324,18 +328,43 @@ Inline row edit is intentionally disabled for ClickHouse — see the [Inline edi
 - SQLite WAL mode enabled to avoid corruption on concurrent reads/writes.
 - MongoDB shell evaluation runs in a `vm` sandbox with a 30-second timeout.
 
+## Advanced features
+
+- **Read-only connections** — tick *Read-only* in the connection form; the server rejects INSERT/UPDATE/DELETE/DDL, row edits, imports and restores with a clear error. Perfect with the red *Production* colour.
+- **Cancel** a running statement (■ button) — PostgreSQL and MySQL cancel on the server too.
+- **Transactions** — *⎔ Begin tx* turns auto-commit off (PostgreSQL / MySQL); every statement runs on one session until *Commit* / *Rollback*.
+- **AI assistant** (✨, `⌘⇧I`) — generate a query from plain language, explain / optimize the editor text, or fix the last error. Needs an Anthropic API key under *Settings*; only table and column names are sent, never rows.
+- **Query parameters** — write `:name` (quoted literal) or `{{name}}` (raw) and dbweb asks for values on run, remembering them per connection.
+- **Import CSV / Excel** — Tools → Import: map file columns to table columns, preview, insert in batches.
+- **Chart** view on any result — bar / line / area / pie, colour-blind-safe palette.
+- **ER diagram** — Tools → ER diagram (foreign keys from PostgreSQL / MySQL / SQL Server), export as SVG or mermaid.
+- **Find column / table** — `⌘⇧F` searches every column in the current database.
+- **Snippets** — a global library with `{{placeholders}}`; insert from the status bar or Tools.
+- **Compare** — schema diff (tables, columns, types) between two connections with generated `CREATE/ALTER`, or data diff of one table by primary key with generated `INSERT/UPDATE/DELETE`.
+- **Server insights** on the Stats tab — slowest statements (`pg_stat_statements`, `performance_schema`, `dm_exec_query_stats`, `system.query_log`, `v$sql`), active sessions, scan hotspots.
+- **Backups** — pg_dump / mysqldump / mongodump into `~/.dbweb/backups`, restore with one click, job log inline. The CLI tools must be installed (`brew install libpq mysql-client mongodb-database-tools`) and `pg_dump` must be at least the server's major version.
+- **Scheduled queries & alerts** — run a statement every N minutes or on a cron, alert when the row count / first value crosses a threshold or the query fails. Alerts appear in the status-bar bell and as macOS notifications; the background server stays alive while a schedule is enabled.
+- **SSH tunnel** — per connection: jump host, password or private key; every driver then dials the local forward.
+
 ## Keyboard shortcuts & UI
 
 | Action | Shortcut / Click |
 |---|---|
-| Run query | `⌘ Enter` (mac) / `Ctrl + Enter` (Win/Linux) |
-| New connection | `+` in the sidebar |
+| Run query (or the highlighted selection) | `⌘ Enter` (mac) / `Ctrl + Enter` (Win/Linux) |
+| Save current query | `⌘ S` |
+| New query tab | `⌥ ⌘ T` or `+` in the tab bar |
+| New connection | `⌥ ⌘ N` or `+ New` in the sidebar |
+| Search connections | `⌘ K` |
+| Toggle sidebar | `⌘ \` |
+| All shortcuts | `?` (or `? Shortcuts` in the status bar) |
+| Move between result cells / open a cell / copy it | `↑ ↓ ← →` / `Enter` / `⌘ C` after clicking a cell |
 | Connection actions (Copy URL, Edit, Duplicate, Export…, Delete) | `⋯` per-connection — opens an overflow menu; closes on outside click / Escape |
 | Export / Import all connections | `⇅` in the sidebar |
 | Collapse connections sidebar | `‹` in the sidebar header |
 | Collapse db-tree | `‹` in the workbench tree header |
 | Toggle Table / JSON view | Segmented control in the editor toolbar |
-| Save current query | `☆ Save` button (prompts for a name) |
+| Test a connection before saving | `Test connection` in the connection form |
+| Environment color | Connection form → red = Production, orange = Staging, … shows as a stripe + pill |
 | Right-click host | Server Status / Host Info / Version / Refresh |
 | Right-click table or collection | View / Insert / Update / Remove / Drop / Indexes / Stats |
 | Drag the pane divider | Resize editor vs result |
@@ -343,10 +372,10 @@ Inline row edit is intentionally disabled for ClickHouse — see the [Inline edi
 ## Roadmap
 
 - [ ] Inline `updateRow` for Oracle / MSSQL — needs proper bind-type mapping (currently returns `NOT_SUPPORTED 501`)
-- [ ] PostgreSQL multi-database browse — today the configured database is used and the `database` param is treated as a schema
-- [ ] `AbortSignal` cancellation for long-running queries
+- [x] Per-call database context (Postgres per-db pool, MySQL `USE`, MSSQL `USE` prefix, Mongo `db.`)
+- [x] `AbortSignal` cancellation for long-running queries (pg / mysql cancel server-side)
 - [ ] Robo3T-style hierarchical JSON tree (key / value / type columns) — currently only pretty-printed JSON
-- [ ] Multiple parallel query tabs
+- [x] Multiple parallel query tabs
 - [ ] ClickHouse native TCP support — current HTTP adapter can't reach Coolify's default proxy mapping
 - [ ] Tauri build for a packaged desktop binary
 

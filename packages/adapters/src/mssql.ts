@@ -6,6 +6,7 @@ import type {
   DbStats,
   ExecuteOptions,
   QueryResult,
+  Relation,
   SchemaObject,
 } from "./types.js";
 import { registerAdapter } from "./registry.js";
@@ -125,6 +126,27 @@ class MssqlAdapter implements DbAdapter {
     }));
   }
 
+  async listRelations(database: string): Promise<Relation[]> {
+    const safe = database.replace(/[^\w]/g, "");
+    const res = await this.runQuery(
+      `SELECT fk.name AS name,
+              OBJECT_NAME(fkc.parent_object_id, DB_ID('${safe}')) AS from_table,
+              COL_NAME(fkc.parent_object_id, fkc.parent_column_id) AS from_column,
+              OBJECT_NAME(fkc.referenced_object_id, DB_ID('${safe}')) AS to_table,
+              COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) AS to_column
+       FROM [${safe}].sys.foreign_keys fk
+       JOIN [${safe}].sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+       ORDER BY from_table, fk.name`,
+    );
+    return res.rows.map((r) => ({
+      name: String(r[0]?.value ?? ""),
+      fromTable: String(r[1]?.value ?? ""),
+      fromColumn: String(r[2]?.value ?? ""),
+      toTable: String(r[3]?.value ?? ""),
+      toColumn: String(r[4]?.value ?? ""),
+    }));
+  }
+
   async describeObject(database: string, name: string): Promise<ColumnInfo[]> {
     const safe = database.replace(/[^\w]/g, "");
     const safeName = name.replace(/'/g, "''");
@@ -156,7 +178,11 @@ class MssqlAdapter implements DbAdapter {
     // not the whole table. Callers that want more pass `maxRows` explicitly.
     const maxRows = opts.maxRows ?? 50;
     const start = performance.now();
-    const res = await this.runQuery(statement);
+    // T-SQL lets USE lead a batch, so a per-call database costs one prefix.
+    const scoped = opts.database
+      ? `USE [${opts.database.replace(/]/g, "]]")}];\n${statement}`
+      : statement;
+    const res = await this.runQuery(scoped);
     const elapsedMs = Math.round(performance.now() - start);
 
     if (res.rows.length === 0) {

@@ -9,7 +9,7 @@ import {
   listConnections,
   updateConnection,
 } from "../store/connections.js";
-import { dropAdapter, getActiveConnectionIds } from "../services/adapter-pool.js";
+import { dropAdapter, getActiveConnectionIds, openAdapter } from "../services/adapter-pool.js";
 
 const dbKindSchema = z.enum([
   "mysql",
@@ -32,6 +32,19 @@ const connectionInputSchema = z.object({
   database: z.string().optional(),
   // null moves a connection back to "Ungrouped".
   group: z.string().max(64).nullable().optional(),
+  color: z.enum(["red", "orange", "yellow", "green", "blue", "purple", "gray"]).nullable().optional(),
+  readOnly: z.boolean().optional(),
+  ssh: z
+    .object({
+      host: z.string(),
+      port: z.number().int().positive().default(22),
+      username: z.string(),
+      password: z.string().optional(),
+      privateKey: z.string().optional(),
+      passphrase: z.string().optional(),
+    })
+    .nullable()
+    .optional(),
   options: z.record(z.unknown()).optional(),
 });
 
@@ -67,6 +80,43 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
         .code(404)
         .send({ ok: false, error: { code: "NOT_FOUND", message: "Connection not found" } });
     return { ok: true, data: { url: buildUrl(conn) } };
+  });
+
+  // Probe an *unsaved* connection config from the form ("Test" button).
+  // Opens a throwaway adapter, pings, closes — never touches the pool or the
+  // store. For edits with a blank password the client passes `id` so we can
+  // reuse the stored secret.
+  app.post("/api/connections/test", async (req, reply) => {
+    const parsed = connectionInputSchema.extend({ id: z.string().optional() }).safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: { code: "BAD_INPUT", message: parsed.error.message } });
+    }
+    const { id, ...input } = parsed.data;
+    let password = input.password;
+    let ssh = input.ssh ?? null;
+    if (id) {
+      const existing = await getConnection(id, true);
+      if (!password) password = existing?.password;
+      // Blank SSH secrets on an edit mean "keep what's stored".
+      if (ssh && existing?.ssh && !ssh.password && !ssh.privateKey) {
+        ssh = { ...ssh, password: existing.ssh.password, privateKey: existing.ssh.privateKey, passphrase: ssh.passphrase || existing.ssh.passphrase };
+      }
+    }
+    const now = new Date().toISOString();
+    let opened: Awaited<ReturnType<typeof openAdapter>> | null = null;
+    try {
+      opened = await openAdapter({ ...input, password, ssh, id: id ?? "adhoc", createdAt: now, updatedAt: now });
+      const ping = await opened.adapter.ping();
+      return { ok: true, data: ping };
+    } catch (err) {
+      return reply.code(400).send({
+        ok: false,
+        error: { code: "CONNECT_FAILED", message: (err as Error).message },
+      });
+    } finally {
+      await opened?.adapter.close().catch(() => undefined);
+      await opened?.tunnel?.close().catch(() => undefined);
+    }
   });
 
   app.post("/api/connections", async (req, reply) => {

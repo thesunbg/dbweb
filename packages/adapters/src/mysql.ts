@@ -6,6 +6,7 @@ import type {
   DbStats,
   ExecuteOptions,
   QueryResult,
+  Relation,
   RowChange,
   SchemaObject,
 } from "./types.js";
@@ -25,6 +26,7 @@ interface Queryable {
   ): Promise<[T, mysql.FieldPacket[]]>;
   ping(): Promise<void>;
   release(): void;
+  threadId: number;
 }
 
 const asQueryable = (c: mysql.PoolConnection): Queryable => c as unknown as Queryable;
@@ -32,6 +34,8 @@ const asQueryable = (c: mysql.PoolConnection): Queryable => c as unknown as Quer
 class MysqlAdapter implements DbAdapter {
   readonly kind = "mysql" as const;
   private pool: mysql.Pool | null = null;
+  /** Explicit transactions: txId → pinned connection. */
+  private txConns = new Map<string, Queryable>();
 
   constructor(private readonly config: ConnectionConfig) {}
 
@@ -138,7 +142,33 @@ class MysqlAdapter implements DbAdapter {
     // Default cap matches the interactive editor's intent: show a preview,
     // not the whole table. Callers that want more pass `maxRows` explicitly.
     const maxRows = opts.maxRows ?? 50;
-    return this.withConn(async (c) => {
+    const run = async (c: Queryable) => {
+      // Per-call schema switch so the editor runs against whatever the tree
+      // has selected. Scoped to this borrowed connection; the pool's default
+      // is untouched for callers that don't pass one.
+      if (opts.database && !opts.transactionId) {
+        await c.query("USE `" + opts.database.replace(/`/g, "``") + "`");
+      }
+      // Cancellation: KILL QUERY on this thread from another connection.
+      const onAbort = () => {
+        void this.getPool().query("KILL QUERY ?", [c.threadId]).catch(() => undefined);
+      };
+      if (opts.signal?.aborted) onAbort();
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        return await runOn(c);
+      } finally {
+        opts.signal?.removeEventListener("abort", onAbort);
+      }
+    };
+    if (opts.transactionId) {
+      const tx = this.txConns.get(opts.transactionId);
+      if (!tx) throw new Error(`Unknown transaction ${opts.transactionId}`);
+      return run(tx);
+    }
+    return this.withConn(run);
+
+    async function runOn(c: Queryable): Promise<QueryResult> {
       const start = performance.now();
       const [result, fields] = await c.query<Row[] | mysql.ResultSetHeader>(statement);
       const elapsedMs = Math.round(performance.now() - start);
@@ -164,6 +194,81 @@ class MysqlAdapter implements DbAdapter {
         affectedRows: result.affectedRows,
         elapsedMs,
       };
+    }
+  }
+
+  async beginTransaction(txId: string, database?: string): Promise<void> {
+    const conn = asQueryable(await this.getPool().getConnection());
+    try {
+      if (database) await conn.query("USE `" + database.replace(/`/g, "``") + "`");
+      await conn.query("START TRANSACTION");
+    } catch (err) {
+      conn.release();
+      throw err;
+    }
+    this.txConns.set(txId, conn);
+  }
+
+  async commitTransaction(txId: string): Promise<void> {
+    const conn = this.txConns.get(txId);
+    if (!conn) throw new Error(`Unknown transaction ${txId}`);
+    this.txConns.delete(txId);
+    try {
+      await conn.query("COMMIT");
+    } finally {
+      conn.release();
+    }
+  }
+
+  async rollbackTransaction(txId: string): Promise<void> {
+    const conn = this.txConns.get(txId);
+    if (!conn) throw new Error(`Unknown transaction ${txId}`);
+    this.txConns.delete(txId);
+    try {
+      await conn.query("ROLLBACK");
+    } finally {
+      conn.release();
+    }
+  }
+
+  async insertRows(database: string, table: string, columns: string[], rows: unknown[][]): Promise<{ inserted: number }> {
+    if (rows.length === 0) return { inserted: 0 };
+    const q = mysql.escapeId;
+    const cols = columns.map((c) => q(c)).join(", ");
+    let inserted = 0;
+    const chunk = Math.max(1, Math.floor(30000 / Math.max(1, columns.length)));
+    await this.withConn(async (c) => {
+      for (let i = 0; i < rows.length; i += chunk) {
+        const slice = rows.slice(i, i + chunk);
+        const placeholders = slice.map(() => `(${columns.map(() => "?").join(", ")})`).join(", ");
+        const params = slice.flatMap((r) => columns.map((_, idx) => r[idx] ?? null));
+        const [res] = await c.query<mysql.ResultSetHeader>(
+          `INSERT INTO ${q(database)}.${q(table)} (${cols}) VALUES ${placeholders}`,
+          params,
+        );
+        inserted += (res as mysql.ResultSetHeader).affectedRows;
+      }
+    });
+    return { inserted };
+  }
+
+  async listRelations(database: string): Promise<Relation[]> {
+    return this.withConn(async (c) => {
+      const [rows] = await c.query<Row[]>(
+        `SELECT constraint_name AS name, table_name AS from_table, column_name AS from_column,
+                referenced_table_name AS to_table, referenced_column_name AS to_column
+         FROM information_schema.key_column_usage
+         WHERE table_schema = ? AND referenced_table_name IS NOT NULL
+         ORDER BY table_name, constraint_name, ordinal_position`,
+        [database],
+      );
+      return rows.map((r) => ({
+        name: String(r.name),
+        fromTable: String(r.from_table),
+        fromColumn: String(r.from_column),
+        toTable: String(r.to_table),
+        toColumn: String(r.to_column),
+      }));
     });
   }
 
@@ -227,6 +332,11 @@ class MysqlAdapter implements DbAdapter {
   }
 
   async close(): Promise<void> {
+    for (const [id, c] of this.txConns) {
+      this.txConns.delete(id);
+      await c.query("ROLLBACK").catch(() => undefined);
+      c.release();
+    }
     if (!this.pool) return;
     const p = this.pool;
     this.pool = null;

@@ -11,10 +11,18 @@ import { connectionRoutes } from "./routes/connections.js";
 import { dbRoutes } from "./routes/db.js";
 import { exportRoutes } from "./routes/export.js";
 import { portabilityRoutes } from "./routes/portability.js";
+import { settingsRoutes } from "./routes/settings.js";
+import { snippetRoutes } from "./routes/snippets.js";
+import { scheduleRoutes } from "./routes/schedules.js";
+import { backupRoutes } from "./routes/backups.js";
+import { importRoutes } from "./routes/import.js";
+import { hasActiveSchedules, startScheduler } from "./services/scheduler.js";
 
 async function main() {
   const app = Fastify({
     logger: { transport: { target: "pino-pretty", options: { colorize: true } } },
+    // CSV / Excel imports arrive as base64 JSON bodies.
+    bodyLimit: 256 * 1024 * 1024,
   });
 
   await app.register(cors, { origin: true });
@@ -28,6 +36,11 @@ async function main() {
   await dbRoutes(app);
   await exportRoutes(app);
   await portabilityRoutes(app);
+  await settingsRoutes(app);
+  await snippetRoutes(app);
+  await scheduleRoutes(app);
+  await backupRoutes(app);
+  await importRoutes(app);
 
   // Serve the built web app from the same origin so the whole thing is one
   // process — that is what the installed Chrome PWA points at. Dev still uses
@@ -48,6 +61,7 @@ async function main() {
   getDb();
 
   installIdleExit(app);
+  startScheduler(app.log);
 
   // launchctl bootout / Ctrl-C: hang up on remote DBs before exiting.
   for (const signal of ["SIGTERM", "SIGINT"] as const) {
@@ -92,6 +106,8 @@ function installIdleExit(app: FastifyInstance): void {
   const timer = setInterval(() => {
     if (inFlight > 0) return;
     if (Date.now() - lastActivity < idleMs) return;
+    // Scheduled monitors need the server up even with the window closed.
+    if (hasActiveSchedules()) return;
     clearInterval(timer);
     void (async () => {
       app.log.info(`idle for ${minutes}m — exiting`);

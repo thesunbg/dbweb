@@ -211,6 +211,14 @@ class MongoAdapter implements DbAdapter {
    *      `{ "aggregate": "users", "pipeline": [...] }`
    *   3) Bare collection name: dumps the collection with default limit.
    */
+  async insertRows(database: string, collection: string, columns: string[], rows: unknown[][]): Promise<{ inserted: number }> {
+    if (rows.length === 0) return { inserted: 0 };
+    const db = await this.db(database);
+    const docs = rows.map((r) => Object.fromEntries(columns.map((c, i) => [c, r[i] ?? null])));
+    const res = (await db.collection(collection).insertMany(docs, { ordered: false })) as { insertedCount?: number };
+    return { inserted: res.insertedCount ?? docs.length };
+  }
+
   async execute(statement: string, opts: ExecuteOptions = {}): Promise<QueryResult> {
     // Default cap matches the interactive editor's intent: show a preview,
     // not the whole collection. Callers that want more pass `maxRows`.
@@ -226,7 +234,7 @@ class MongoAdapter implements DbAdapter {
     const defaultLimit: number | null = maxRows > 1000 ? null : maxRows;
     const start = performance.now();
     const { pkg } = await this.getClientAndDriver();
-    const db = await this.db();
+    const db = await this.db(opts.database);
     const trimmed = statement.trim();
 
     let raw: unknown;

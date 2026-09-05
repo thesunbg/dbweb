@@ -1,195 +1,351 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ConnectionConfig } from "@dbweb/shared-types";
-import { api, type ColumnInfoDto } from "../api.js";
+import { api } from "../api.js";
+import { ResultGrid, type GridSort } from "./ResultGrid.js";
+import { downloadText, rowsToCsv, rowsToJson } from "../lib/export.js";
+import {
+  FILTER_OPS,
+  buildCount,
+  buildDelete,
+  buildInsertTemplate,
+  buildSelect,
+  buildWhere,
+  opNeedsValue,
+  rowToInsert,
+  type Filter,
+} from "../lib/sql.js";
+import { confirmDialog, copyText, toast } from "../lib/ui.js";
+import { readPref, writePref } from "../lib/prefs.js";
 
 interface Props {
   connection: ConnectionConfig;
   database: string;
   table: string;
+  /** Hand a statement to the editor (INSERT template, custom query, …). */
+  onOpenInEditor: (statement: string, title?: string) => void;
+  onImport?: () => void;
 }
 
-interface Filter {
-  column: string;
-  op: "=" | "!=" | ">" | "<" | ">=" | "<=" | "LIKE" | "IS NULL" | "IS NOT NULL";
-  value: string;
-}
+const PAGE_SIZES = [50, 100, 200, 500, 1000];
 
-const QUOTE: Record<ConnectionConfig["kind"], (s: string) => string> = {
-  mysql: (s) => "`" + s.replace(/`/g, "``") + "`",
-  postgres: (s) => '"' + s.replace(/"/g, '""') + '"',
-  oracle: (s) => '"' + s.replace(/"/g, '""') + '"',
-  mssql: (s) => "[" + s.replace(/]/g, "]]") + "]",
-  mongodb: (s) => s,
-  redis: (s) => s,
-  dragonfly: (s) => s,
-  // ClickHouse follows MySQL's backtick convention for identifiers.
-  clickhouse: (s) => "`" + s.replace(/`/g, "``") + "`",
-};
-
-export function TableBrowser({ connection, database, table }: Props) {
+/**
+ * Spreadsheet-style table view: server-side paging + sorting + filters,
+ * double-click-to-edit cells with a single "Save changes" commit, row
+ * delete, and one-click export of the current page or the whole table.
+ */
+export function TableBrowser({ connection, database, table, onOpenInEditor, onImport }: Props) {
   const qc = useQueryClient();
   const [filters, setFilters] = useState<Filter[]>([]);
-  const [limit, setLimit] = useState(100);
-  const [edits, setEdits] = useState<Record<string, Record<string, unknown>>>({});
+  const [pageSize, setPageSize] = useState<number>(() => readPref("pageSize", 100));
+  const [page, setPage] = useState(0);
+  const [sort, setSort] = useState<GridSort | null>(null);
+  const [edits, setEdits] = useState<Record<number, Record<string, string | null>>>({});
+  const [showFilters, setShowFilters] = useState(false);
 
   const cols = useQuery({
     queryKey: ["cols", connection.id, database, table],
     queryFn: () => api.describeObject(connection.id, database, table),
   });
 
-  const sql = useMemo(() => buildSql(connection.kind, database, table, filters, limit), [
-    connection.kind,
-    database,
-    table,
-    filters,
-    limit,
-  ]);
+  const where = useMemo(() => buildWhere(connection.kind, filters), [connection.kind, filters]);
+  const sql = useMemo(
+    () => buildSelect(connection.kind, database, table, { where, sort, limit: pageSize, offset: page * pageSize }),
+    [connection.kind, database, table, where, sort, pageSize, page],
+  );
+  const countSql = useMemo(() => buildCount(connection.kind, database, table, where), [connection.kind, database, table, where]);
 
   const data = useQuery({
     queryKey: ["browse", connection.id, sql],
-    queryFn: () => api.execute(connection.id, sql, database),
+    queryFn: () => api.execute(connection.id, sql, database, pageSize),
     enabled: cols.isSuccess,
-    refetchOnWindowFocus: false,
+    placeholderData: (prev) => prev,
   });
+  const count = useQuery({
+    queryKey: ["browse-count", connection.id, countSql],
+    queryFn: () => api.execute(connection.id, countSql, database, 1),
+    enabled: cols.isSuccess,
+    staleTime: 60_000,
+  });
+  const total = count.data ? Number(count.data.rows[0]?.[0] ?? NaN) : NaN;
 
-  const update = useMutation({
-    mutationFn: (payload: {
-      primaryKey: Record<string, unknown>;
-      changes: Record<string, unknown>;
-    }) => api.updateRow(connection.id, { database, table, ...payload }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["browse", connection.id, sql] });
-      setEdits({});
-    },
-  });
+  // Filters / sort changes restart from page 0 and drop pending edits — the
+  // row indexes they pointed at are meaningless once the page changes.
+  useEffect(() => {
+    setPage(0);
+  }, [where, sort, pageSize]);
+  useEffect(() => {
+    setEdits({});
+  }, [sql]);
 
   const pkCols = useMemo(() => cols.data?.filter((c) => c.primaryKey) ?? [], [cols.data]);
-  // ClickHouse has primary-key columns in its schema but doesn't support
-  // synchronous row updates — gate the inline-edit UI on both PK detection
-  // and adapter capability so the user doesn't see edit affordances that
-  // would fail server-side with NOT_SUPPORTED.
-  const canEdit = pkCols.length > 0 && connection.kind !== "clickhouse";
+  const canEdit = pkCols.length > 0 && connection.kind !== "clickhouse" && !connection.readOnly;
 
-  const rowKey = (row: unknown[]) => {
-    if (!data.data || pkCols.length === 0) return "";
-    const fieldIdx = (name: string) => data.data.fields.indexOf(name);
-    return pkCols.map((c) => `${c.name}=${String(row[fieldIdx(c.name)])}`).join("|");
+  const fields = data.data?.fields ?? [];
+  const rows = data.data?.rows ?? [];
+  const fieldIdx = (name: string) => fields.indexOf(name);
+  const pkOf = (row: unknown[]) => Object.fromEntries(pkCols.map((c) => [c.name, row[fieldIdx(c.name)]]));
+
+  const dirtyCount = Object.values(edits).filter((e) => Object.keys(e).length > 0).length;
+
+  const saveAll = useMutation({
+    mutationFn: async () => {
+      let n = 0;
+      for (const [idx, changes] of Object.entries(edits)) {
+        if (Object.keys(changes).length === 0) continue;
+        const row = rows[Number(idx)];
+        if (!row) continue;
+        await api.updateRow(connection.id, { database, table, primaryKey: pkOf(row), changes });
+        n++;
+      }
+      return n;
+    },
+    onSuccess: (n) => {
+      toast.success(`${n} row${n === 1 ? "" : "s"} updated`);
+      setEdits({});
+      void qc.invalidateQueries({ queryKey: ["browse", connection.id, sql] });
+    },
+    onError: (e) => toast.error((e as Error).message),
+  });
+
+  const deleteRow = async (row: unknown[]) => {
+    const pk = pkOf(row);
+    const desc = Object.entries(pk)
+      .map(([k, v]) => `${k}=${String(v)}`)
+      .join(", ");
+    const ok = await confirmDialog({
+      title: "Delete this row?",
+      message: `DELETE FROM ${table} WHERE ${desc}. This cannot be undone.`,
+      confirmLabel: "Delete row",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const res = await api.execute(connection.id, buildDelete(connection.kind, database, table, pk), database);
+      toast.success(`${res.affectedRows ?? 1} row deleted`);
+      void qc.invalidateQueries({ queryKey: ["browse", connection.id] });
+      void qc.invalidateQueries({ queryKey: ["browse-count", connection.id] });
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
   };
 
-  const onCellEdit = (row: unknown[], col: ColumnInfoDto, newValue: string) => {
-    const key = rowKey(row);
-    setEdits((prev) => ({
-      ...prev,
-      [key]: { ...(prev[key] ?? {}), [col.name]: newValue },
-    }));
+  const exportServer = (format: "json" | "csv" | "xlsx") => {
+    const a = document.createElement("a");
+    a.href = api.exportTableUrl(connection.id, database, table, format);
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast.info(`Exporting ${table} as ${format.toUpperCase()}…`);
   };
 
-  const commitRow = (row: unknown[]) => {
-    if (!data.data) return;
-    const key = rowKey(row);
-    const changes = edits[key];
-    if (!changes || Object.keys(changes).length === 0) return;
-    const fieldIdx = (name: string) => data.data!.fields.indexOf(name);
-    const primaryKey: Record<string, unknown> = {};
-    for (const c of pkCols) primaryKey[c.name] = row[fieldIdx(c.name)];
-    update.mutate({ primaryKey, changes });
-  };
+  const pageCount = Number.isFinite(total) ? Math.max(1, Math.ceil(total / pageSize)) : undefined;
+  const from = page * pageSize + 1;
+  const to = page * pageSize + rows.length;
 
   return (
     <div className="browser">
       <div className="browser-toolbar">
-        <strong>{database}.{table}</strong>
-        {!canEdit && <span className="muted"> · no PK detected, edits disabled</span>}
-        {update.isError && (
-          <span className="error"> · {(update.error as Error).message}</span>
+        <strong className="browser-title" title={`${database}.${table}`}>
+          {table}
+        </strong>
+        <span className="muted hint">{database}</span>
+        {cols.data && (
+          <span className="muted hint">
+            · {cols.data.length} cols{pkCols.length > 0 ? ` · PK ${pkCols.map((c) => c.name).join(", ")}` : ""}
+          </span>
         )}
+        {cols.isSuccess && !canEdit && (
+          <span className="muted hint" title={connection.readOnly ? "Connection is read-only" : connection.kind === "clickhouse" ? "ClickHouse updates are async" : "Table has no primary key"}>
+            · {connection.readOnly ? "🔒 read-only connection" : "read-only"}
+          </span>
+        )}
+
         <div className="grow" />
-        <label className="inline">
-          Limit
-          <input
-            type="number"
-            value={limit}
-            onChange={(e) => setLimit(Math.max(1, Math.min(10000, Number(e.target.value))))}
-            min={1}
-            max={10000}
-          />
-        </label>
-        <button type="button" className="ghost" onClick={() => data.refetch()}>
-          Reload
+
+        <button type="button" className={`ghost ${showFilters || filters.length ? "active" : ""}`} onClick={() => setShowFilters((v) => !v)}>
+          ⚲ Filter{filters.length ? ` (${filters.length})` : ""}
         </button>
+        <button
+          type="button"
+          className="ghost"
+          onClick={() => {
+            void data.refetch();
+            void count.refetch();
+          }}
+          title="Reload"
+        >
+          ⟳
+        </button>
+        {canEdit && (
+          <button type="button" className="ghost" onClick={() => cols.data && onOpenInEditor(buildInsertTemplate(connection.kind, database, table, cols.data), `Insert · ${table}`)} title="Open an INSERT template in the editor">
+            + Row
+          </button>
+        )}
+        <button type="button" className="ghost" onClick={() => onOpenInEditor(sql, table)} title="Open this query in the editor">
+          ≡ SQL
+        </button>
+        {onImport && !connection.readOnly && (
+          <button type="button" className="ghost" onClick={onImport} title="Import CSV / Excel into this table">
+            ↥ Import
+          </button>
+        )}
+        <select
+          className="saved-select"
+          value=""
+          title="Export"
+          onChange={(e) => {
+            const v = e.target.value;
+            if (!data.data) return;
+            if (v === "page-csv") downloadText(`${table}-page${page + 1}.csv`, "﻿" + rowsToCsv(fields, rows), "text/csv");
+            else if (v === "page-json") downloadText(`${table}-page${page + 1}.json`, rowsToJson(fields, rows), "application/json");
+            else if (v === "all-csv") exportServer("csv");
+            else if (v === "all-json") exportServer("json");
+            else if (v === "all-xlsx") exportServer("xlsx");
+          }}
+        >
+          <option value="">↓ Export…</option>
+          <option value="page-csv">This page → CSV</option>
+          <option value="page-json">This page → JSON</option>
+          <option value="all-csv">Whole table → CSV</option>
+          <option value="all-json">Whole table → JSON</option>
+          <option value="all-xlsx">Whole table → Excel</option>
+        </select>
+
+        {dirtyCount > 0 && (
+          <>
+            <button type="button" className="ghost" onClick={() => setEdits({})}>
+              Discard
+            </button>
+            <button type="button" className="primary" onClick={() => saveAll.mutate()} disabled={saveAll.isPending}>
+              {saveAll.isPending ? "Saving…" : `Save ${dirtyCount} row${dirtyCount === 1 ? "" : "s"}`}
+            </button>
+          </>
+        )}
       </div>
 
-      <FilterBar
-        columns={cols.data ?? []}
-        filters={filters}
-        onChange={setFilters}
-      />
+      {showFilters && (
+        <FilterBar
+          columns={cols.data ?? []}
+          filters={filters}
+          onChange={setFilters}
+          onClose={() => setShowFilters(false)}
+        />
+      )}
 
       <div className="result-pane">
-        {data.isError && <div className="error result-error">{(data.error as Error).message}</div>}
-        {data.data && (
-          <div className="result-table-wrap">
-            <table className="result-table">
-              <thead>
-                <tr>
-                  {data.data.fields.map((f) => {
-                    const c = cols.data?.find((x) => x.name === f);
-                    return (
-                      <th key={f}>
-                        {f}
-                        {c?.primaryKey && <span className="pk-badge">PK</span>}
-                      </th>
-                    );
-                  })}
-                  {canEdit && <th>·</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {data.data.rows.map((row, i) => {
-                  const key = rowKey(row);
-                  const dirty = edits[key] && Object.keys(edits[key]).length > 0;
-                  return (
-                    <tr key={i} className={dirty ? "dirty" : ""}>
-                      {row.map((cell, j) => {
-                        const fieldName = data.data!.fields[j]!;
-                        const colMeta = cols.data?.find((c) => c.name === fieldName);
-                        const isPk = colMeta?.primaryKey ?? false;
-                        const editable = canEdit && !isPk && !!colMeta;
-                        const editedValue = edits[key]?.[fieldName];
-                        const display =
-                          editedValue !== undefined ? String(editedValue) : renderCell(cell);
-                        return (
-                          <td key={j} className={editable ? "editable" : undefined}>
-                            {editable ? (
-                              <input
-                                value={display}
-                                onChange={(e) => onCellEdit(row, colMeta!, e.target.value)}
-                              />
-                            ) : (
-                              display
-                            )}
-                          </td>
-                        );
-                      })}
-                      {canEdit && (
-                        <td>
-                          <button
-                            type="button"
-                            className="primary tiny"
-                            disabled={!dirty || update.isPending}
-                            onClick={() => commitRow(row)}
-                          >
-                            Save
-                          </button>
-                        </td>
-                      )}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+        {(data.isError || count.isError) && (
+          <div className="error result-error">
+            <pre>{((data.error ?? count.error) as Error).message}</pre>
           </div>
+        )}
+        {data.isLoading && <div className="result-loading">Loading…</div>}
+        {data.data && (
+          <ResultGrid
+            fields={fields}
+            rows={rows}
+            columns={cols.data}
+            sort={sort}
+            onSort={(column) =>
+              setSort((s) => (!s || s.column !== column ? { column, dir: "asc" } : s.dir === "asc" ? { column, dir: "desc" } : null))
+            }
+            rowStart={from}
+            editable={
+              canEdit
+                ? {
+                    canEditField: (f) => !pkCols.some((c) => c.name === f) && !!cols.data?.some((c) => c.name === f),
+                    edits,
+                    onEdit: (rowIdx, field, value) =>
+                      setEdits((prev) => ({ ...prev, [rowIdx]: { ...(prev[rowIdx] ?? {}), [field]: value } })),
+                  }
+                : undefined
+            }
+            rowActions={
+              canEdit
+                ? (row, rowIdx) => (
+                    <span className="row-tight">
+                      {edits[rowIdx] && Object.keys(edits[rowIdx]!).length > 0 && (
+                        <button
+                          type="button"
+                          className="ghost icon-btn"
+                          title="Discard changes to this row"
+                          onClick={() =>
+                            setEdits((prev) => {
+                              const { [rowIdx]: _drop, ...rest } = prev;
+                              return rest;
+                            })
+                          }
+                        >
+                          ↶
+                        </button>
+                      )}
+                      <button type="button" className="ghost icon-btn danger" title="Delete row" onClick={() => void deleteRow(row)}>
+                        🗑
+                      </button>
+                    </span>
+                  )
+                : undefined
+            }
+            extraMenu={({ rowIdx }) => [
+              { label: "Copy row as INSERT", onPick: () => void copyText(rowToInsert(connection.kind, table, fields, rows[rowIdx]!), "INSERT copied") },
+              ...(canEdit ? [{ label: "Delete row…", onPick: () => void deleteRow(rows[rowIdx]!), danger: true }] : []),
+            ]}
+          />
+        )}
+      </div>
+
+      <div className="pager">
+        <span className="muted">
+          {rows.length === 0
+            ? "No rows"
+            : Number.isFinite(total)
+              ? `${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()}`
+              : `${from.toLocaleString()}–${to.toLocaleString()}`}
+          {data.data && <> · {data.data.elapsedMs}ms</>}
+          {data.isFetching && <> · loading…</>}
+        </span>
+        <div className="grow" />
+        <label className="inline hint">
+          per page
+          <select
+            value={pageSize}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              setPageSize(v);
+              writePref("pageSize", v);
+            }}
+          >
+            {PAGE_SIZES.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button type="button" className="ghost tiny" disabled={page === 0} onClick={() => setPage(0)} title="First page">
+          «
+        </button>
+        <button type="button" className="ghost tiny" disabled={page === 0} onClick={() => setPage((p) => p - 1)} title="Previous page">
+          ‹
+        </button>
+        <span className="hint">
+          page {page + 1}
+          {pageCount ? ` / ${pageCount}` : ""}
+        </span>
+        <button
+          type="button"
+          className="ghost tiny"
+          disabled={pageCount ? page + 1 >= pageCount : rows.length < pageSize}
+          onClick={() => setPage((p) => p + 1)}
+          title="Next page"
+        >
+          ›
+        </button>
+        {pageCount && (
+          <button type="button" className="ghost tiny" disabled={page + 1 >= pageCount} onClick={() => setPage(pageCount - 1)} title="Last page">
+            »
+          </button>
         )}
       </div>
     </div>
@@ -197,107 +353,69 @@ export function TableBrowser({ connection, database, table }: Props) {
 }
 
 interface FilterBarProps {
-  columns: ColumnInfoDto[];
+  columns: { name: string }[];
   filters: Filter[];
   onChange: (next: Filter[]) => void;
+  onClose: () => void;
 }
 
-function FilterBar({ columns, filters, onChange }: FilterBarProps) {
+function FilterBar({ columns, filters, onChange, onClose }: FilterBarProps) {
+  const updateAt = (i: number, patch: Partial<Filter>) => onChange(filters.map((f, idx) => (idx === i ? { ...f, ...patch } : f)));
+  const removeAt = (i: number) => onChange(filters.filter((_, idx) => idx !== i));
+  const add = () => {
+    const first = columns[0];
+    if (first) onChange([...filters, { column: first.name, op: "=", value: "" }]);
+  };
+
+  // Empty filter bar → seed one chip so there's something to type into.
+  useEffect(() => {
+    if (filters.length === 0 && columns.length > 0) add();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columns.length]);
+
   return (
     <div className="filter-bar">
       {filters.map((f, i) => (
         <div key={i} className="filter-chip">
-          <select
-            value={f.column}
-            onChange={(e) => updateAt(i, { column: e.target.value })}
-          >
+          <select value={f.column} onChange={(e) => updateAt(i, { column: e.target.value })}>
             {columns.map((c) => (
               <option key={c.name} value={c.name}>
                 {c.name}
               </option>
             ))}
           </select>
-          <select
-            value={f.op}
-            onChange={(e) => updateAt(i, { op: e.target.value as Filter["op"] })}
-          >
-            {(["=", "!=", ">", "<", ">=", "<=", "LIKE", "IS NULL", "IS NOT NULL"] as const).map((o) => (
-              <option key={o} value={o}>{o}</option>
+          <select value={f.op} onChange={(e) => updateAt(i, { op: e.target.value as Filter["op"] })}>
+            {FILTER_OPS.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
             ))}
           </select>
-          {f.op !== "IS NULL" && f.op !== "IS NOT NULL" && (
+          {opNeedsValue(f.op) && (
             <input
               value={f.value}
               onChange={(e) => updateAt(i, { value: e.target.value })}
-              placeholder="value"
+              placeholder={f.op === "IN" ? "a, b, c" : f.op.includes("LIKE") ? "%text%" : "value"}
+              autoFocus={i === filters.length - 1}
             />
           )}
-          <button type="button" className="ghost icon" onClick={() => removeAt(i)}>×</button>
+          <button type="button" className="ghost icon-btn" onClick={() => removeAt(i)} title="Remove">
+            ×
+          </button>
         </div>
       ))}
-      <button
-        type="button"
-        className="ghost"
-        onClick={() => {
-          const first = columns[0];
-          if (!first) return;
-          onChange([...filters, { column: first.name, op: "=", value: "" }]);
-        }}
-        disabled={columns.length === 0}
-      >
-        + filter
+      <button type="button" className="ghost tiny" onClick={add} disabled={columns.length === 0}>
+        + and
+      </button>
+      <div className="grow" />
+      {filters.length > 0 && (
+        <button type="button" className="ghost tiny" onClick={() => onChange([])}>
+          Clear
+        </button>
+      )}
+      <button type="button" className="ghost icon-btn" onClick={onClose} title="Hide filters">
+        ×
       </button>
     </div>
   );
-
-  function updateAt(i: number, patch: Partial<Filter>) {
-    onChange(filters.map((f, idx) => (idx === i ? { ...f, ...patch } : f)));
-  }
-  function removeAt(i: number) {
-    onChange(filters.filter((_, idx) => idx !== i));
-  }
-}
-
-function buildSql(
-  kind: ConnectionConfig["kind"],
-  database: string,
-  table: string,
-  filters: Filter[],
-  limit: number,
-): string {
-  const q = QUOTE[kind] ?? ((s: string) => s);
-  const parts: string[] = [];
-  for (const f of filters) {
-    if (f.op === "IS NULL" || f.op === "IS NOT NULL") {
-      parts.push(`${q(f.column)} ${f.op}`);
-    } else if (f.value !== "") {
-      const escaped = f.value.replace(/'/g, "''");
-      parts.push(`${q(f.column)} ${f.op} '${escaped}'`);
-    }
-  }
-  const where = parts.length > 0 ? ` WHERE ${parts.join(" AND ")}` : "";
-
-  // Postgres tables come back from listObjects as `schema.table` for non-public
-  // schemas, plain `table` for public. Split here so we quote each part
-  // separately rather than producing the invalid `"audit.events"`.
-  if (kind === "postgres") {
-    const dotIdx = table.indexOf(".");
-    const schema = dotIdx === -1 ? "public" : table.slice(0, dotIdx);
-    const tbl = dotIdx === -1 ? table : table.slice(dotIdx + 1);
-    return `SELECT * FROM ${q(schema)}.${q(tbl)}${where} LIMIT ${limit}`;
-  }
-  if (kind === "mssql") {
-    return `SELECT TOP ${limit} * FROM ${q(database)}.dbo.${q(table)}${where}`;
-  }
-  if (kind === "oracle") {
-    return `SELECT * FROM ${q(database)}.${q(table)}${where} FETCH FIRST ${limit} ROWS ONLY`;
-  }
-  return `SELECT * FROM ${q(database)}.${q(table)}${where} LIMIT ${limit}`;
-}
-
-function renderCell(v: unknown): string {
-  if (v === null) return "NULL";
-  if (v === undefined) return "";
-  if (typeof v === "object") return JSON.stringify(v);
-  return String(v);
 }

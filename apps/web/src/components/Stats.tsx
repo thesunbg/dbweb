@@ -2,6 +2,8 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { ConnectionConfig } from "@dbweb/shared-types";
 import { api } from "../api.js";
+import { ResultGrid } from "./ResultGrid.js";
+import { SERVER_INSIGHTS } from "../lib/insights.js";
 
 interface Props {
   connection: ConnectionConfig;
@@ -45,11 +47,14 @@ export function Stats({ connection, database }: Props) {
       .slice(0, 10);
   }, [stats.data]);
 
+  const insights = SERVER_INSIGHTS[connection.kind];
+
   return (
     <div className="stats">
+      {stats.isError && <div className="error result-error"><pre>{(stats.error as Error).message}</pre></div>}
       <div className="stats-grid">
-        <Card label="Database size" value={fmtBytes(stats.data?.sizeBytes)} />
-        <Card label="Tables / collections" value={stats.data?.tableCount?.toString() ?? "—"} />
+        <Card label={database ? `Size · ${database}` : "Database size"} value={stats.isLoading ? "…" : fmtBytes(stats.data?.sizeBytes)} />
+        <Card label="Tables / collections" value={stats.isLoading ? "…" : (stats.data?.tableCount?.toLocaleString() ?? "—")} />
         <Card label="Queries logged" value={summary.total.toString()} />
         <Card
           label="Avg latency"
@@ -72,7 +77,7 @@ export function Stats({ connection, database }: Props) {
       </section>
 
       <section className="stats-section">
-        <h4>Top 5 slowest queries</h4>
+        <h4>Slowest queries (this connection)</h4>
         {summary.slow.length === 0 && <div className="muted">No queries yet.</div>}
         <table className="result-table compact">
           <thead>
@@ -117,7 +122,38 @@ export function Stats({ connection, database }: Props) {
           </table>
         </section>
       )}
+      {insights.map((ins) => (
+        <InsightSection key={ins.title} connectionId={connection.id} database={database} title={ins.title} statement={ins.statement} note={ins.note} />
+      ))}
     </div>
+  );
+}
+
+function InsightSection({ connectionId, database, title, statement, note }: { connectionId: string; database?: string; title: string; statement: string; note?: string }) {
+  const q = useQuery({
+    queryKey: ["insight", connectionId, database, statement],
+    queryFn: () => api.execute(connectionId, statement, database, 50),
+    staleTime: 30_000,
+    retry: false,
+  });
+  return (
+    <section className="stats-section insight">
+      <div className="row-tight" style={{ justifyContent: "space-between" }}>
+        <h4>{title}</h4>
+        <button type="button" className="ghost tiny" onClick={() => void q.refetch()}>
+          ⟳
+        </button>
+      </div>
+      {note && <div className="muted hint">{note}</div>}
+      {q.isLoading && <div className="muted hint">loading…</div>}
+      {q.isError && <div className="muted hint">Not available: {(q.error as Error).message.slice(0, 200)}</div>}
+      {q.data && q.data.rows.length === 0 && <div className="muted hint">Nothing to show.</div>}
+      {q.data && q.data.rows.length > 0 && (
+        <div className="insight-grid">
+          <ResultGrid fields={q.data.fields} rows={q.data.rows} compact />
+        </div>
+      )}
+    </section>
   );
 }
 

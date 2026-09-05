@@ -6,6 +6,7 @@ import type {
   DbStats,
   ExecuteOptions,
   QueryResult,
+  Relation,
   RowChange,
   SchemaObject,
 } from "./types.js";
@@ -20,6 +21,8 @@ import { registerAdapter } from "./registry.js";
 class PostgresAdapter implements DbAdapter {
   readonly kind = "postgres" as const;
   private pools = new Map<string, pg.Pool>();
+  /** Explicit transactions: txId → dedicated client holding the session. */
+  private txClients = new Map<string, pg.PoolClient>();
 
   constructor(private readonly config: ConnectionConfig) {}
 
@@ -147,7 +150,7 @@ class PostgresAdapter implements DbAdapter {
     // explicit `?limit=`) pass `maxRows` explicitly.
     const maxRows = opts.maxRows ?? 50;
     const start = performance.now();
-    const res = await this.getPool().query(statement);
+    const res = await this.runQuery(statement, opts);
     const elapsedMs = Math.round(performance.now() - start);
 
     const isDml = !!res.command && ["INSERT", "UPDATE", "DELETE"].includes(res.command);
@@ -180,6 +183,123 @@ class PostgresAdapter implements DbAdapter {
       elapsedMs,
       truncated,
     };
+  }
+
+  /**
+   * Routes a statement to the right session: a pinned transaction client,
+   * or a pool client that we can cancel via pg_cancel_backend when the
+   * caller's AbortSignal fires (the pool query API has no cancel hook).
+   */
+  private async runQuery(statement: string, opts: ExecuteOptions): Promise<pg.QueryResult> {
+    if (opts.transactionId) {
+      const tx = this.txClients.get(opts.transactionId);
+      if (!tx) throw new Error(`Unknown transaction ${opts.transactionId}`);
+      return tx.query(statement);
+    }
+    const pool = this.getPool(opts.database);
+    if (!opts.signal) return pool.query(statement);
+
+    const client = await pool.connect();
+    try {
+      const pidRes = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const pid = pidRes.rows[0]?.pid;
+      const onAbort = () => {
+        if (pid) void pool.query("SELECT pg_cancel_backend($1)", [pid]).catch(() => undefined);
+      };
+      if (opts.signal.aborted) onAbort();
+      opts.signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        return await client.query(statement);
+      } finally {
+        opts.signal.removeEventListener("abort", onAbort);
+      }
+    } finally {
+      client.release();
+    }
+  }
+
+  async beginTransaction(txId: string, database?: string): Promise<void> {
+    const client = await this.getPool(database).connect();
+    try {
+      await client.query("BEGIN");
+    } catch (err) {
+      client.release();
+      throw err;
+    }
+    this.txClients.set(txId, client);
+  }
+
+  async commitTransaction(txId: string): Promise<void> {
+    const client = this.txClients.get(txId);
+    if (!client) throw new Error(`Unknown transaction ${txId}`);
+    this.txClients.delete(txId);
+    try {
+      await client.query("COMMIT");
+    } finally {
+      client.release();
+    }
+  }
+
+  async rollbackTransaction(txId: string): Promise<void> {
+    const client = this.txClients.get(txId);
+    if (!client) throw new Error(`Unknown transaction ${txId}`);
+    this.txClients.delete(txId);
+    try {
+      await client.query("ROLLBACK");
+    } finally {
+      client.release();
+    }
+  }
+
+  async insertRows(database: string, table: string, columns: string[], rows: unknown[][]): Promise<{ inserted: number }> {
+    if (rows.length === 0) return { inserted: 0 };
+    const { schema, table: tbl } = splitQualified(table);
+    const cols = columns.map(quoteIdent).join(", ");
+    const pool = this.getPool(database);
+    let inserted = 0;
+    // Chunk so a 100k-row CSV doesn't become one 100k-parameter statement.
+    const chunk = Math.max(1, Math.floor(30000 / Math.max(1, columns.length)));
+    for (let i = 0; i < rows.length; i += chunk) {
+      const slice = rows.slice(i, i + chunk);
+      const params: unknown[] = [];
+      const values = slice
+        .map((r) => `(${columns.map((_, c) => { params.push(r[c] ?? null); return `$${params.length}`; }).join(", ")})`)
+        .join(", ");
+      const res = await pool.query(`INSERT INTO ${quoteIdent(schema)}.${quoteIdent(tbl)} (${cols}) VALUES ${values}`, params);
+      inserted += res.rowCount ?? slice.length;
+    }
+    return { inserted };
+  }
+
+  async listRelations(database: string): Promise<Relation[]> {
+    const res = await this.getPool(database).query<{
+      name: string; from_schema: string; from_table: string; from_column: string;
+      to_schema: string; to_table: string; to_column: string;
+    }>(
+      `SELECT con.conname AS name,
+              ns.nspname AS from_schema, cl.relname AS from_table, att.attname AS from_column,
+              fns.nspname AS to_schema, fcl.relname AS to_table, fatt.attname AS to_column
+       FROM pg_constraint con
+       JOIN pg_class cl ON cl.oid = con.conrelid
+       JOIN pg_namespace ns ON ns.oid = cl.relnamespace
+       JOIN pg_class fcl ON fcl.oid = con.confrelid
+       JOIN pg_namespace fns ON fns.oid = fcl.relnamespace
+       JOIN unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+       JOIN unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord) ON fk.ord = k.ord
+       JOIN pg_attribute att ON att.attrelid = cl.oid AND att.attnum = k.attnum
+       JOIN pg_attribute fatt ON fatt.attrelid = fcl.oid AND fatt.attnum = fk.attnum
+       WHERE con.contype = 'f'
+         AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
+       ORDER BY ns.nspname, cl.relname, con.conname, k.ord`,
+    );
+    const q = (s: string, t: string) => (s === "public" ? t : `${s}.${t}`);
+    return res.rows.map((r) => ({
+      name: r.name,
+      fromTable: q(r.from_schema, r.from_table),
+      fromColumn: r.from_column,
+      toTable: q(r.to_schema, r.to_table),
+      toColumn: r.to_column,
+    }));
   }
 
   async getStats(database?: string): Promise<DbStats> {
@@ -242,6 +362,11 @@ class PostgresAdapter implements DbAdapter {
   }
 
   async close(): Promise<void> {
+    for (const [id, c] of this.txClients) {
+      this.txClients.delete(id);
+      await c.query("ROLLBACK").catch(() => undefined);
+      c.release();
+    }
     const pools = [...this.pools.values()];
     this.pools.clear();
     await Promise.all(pools.map((p) => p.end().catch(() => undefined)));

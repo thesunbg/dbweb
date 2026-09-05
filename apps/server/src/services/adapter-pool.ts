@@ -1,7 +1,17 @@
 import { createAdapter, type DbAdapter } from "@dbweb/adapters";
+import type { ConnectionConfig } from "@dbweb/shared-types";
 import { getConnection } from "../store/connections.js";
+import { openTunnel, type Tunnel } from "./tunnel.js";
 
-const cache = new Map<string, { adapter: DbAdapter; lastUsed: number }>();
+interface Entry {
+  adapter: DbAdapter;
+  tunnel: Tunnel | null;
+  /** Host/port the adapter actually dials (127.0.0.1:<tunnel port> when tunnelled). */
+  endpoint: { host: string; port: number };
+  lastUsed: number;
+}
+
+const cache = new Map<string, Entry>();
 const IDLE_MS = 5 * 60 * 1000;
 
 // reapIdle() only ran on the next request, so with the app window closed the
@@ -13,7 +23,8 @@ sweep.unref();
 /**
  * Returns a connected adapter for the given connection id, reusing one if
  * we've spoken to this connection recently. Idle adapters are reaped on every
- * call and by the sweep timer above.
+ * call and by the sweep timer above. Connections with an SSH config get a
+ * tunnel opened first; the adapter then dials the local forward.
  */
 export async function getAdapter(connectionId: string): Promise<DbAdapter> {
   reapIdle();
@@ -24,10 +35,34 @@ export async function getAdapter(connectionId: string): Promise<DbAdapter> {
   }
   const conn = await getConnection(connectionId, true);
   if (!conn) throw new Error(`Connection ${connectionId} not found`);
-  const adapter = createAdapter(conn);
-  await adapter.connect();
-  cache.set(connectionId, { adapter, lastUsed: Date.now() });
+  const { adapter, tunnel, endpoint } = await openAdapter(conn);
+  cache.set(connectionId, { adapter, tunnel, endpoint, lastUsed: Date.now() });
   return adapter;
+}
+
+/** Builds (and connects) an adapter for a config, tunnelling when needed.
+ *  Shared with the ad-hoc "Test connection" route, which never caches. */
+export async function openAdapter(conn: ConnectionConfig): Promise<{ adapter: DbAdapter; tunnel: Tunnel | null; endpoint: { host: string; port: number } }> {
+  let tunnel: Tunnel | null = null;
+  let effective = conn;
+  if (conn.ssh?.host) {
+    tunnel = await openTunnel(conn.ssh, conn.host, conn.port);
+    effective = { ...conn, host: "127.0.0.1", port: tunnel.localPort };
+  }
+  const adapter = createAdapter(effective);
+  try {
+    await adapter.connect();
+  } catch (err) {
+    await tunnel?.close().catch(() => undefined);
+    throw err;
+  }
+  return { adapter, tunnel, endpoint: { host: effective.host, port: effective.port } };
+}
+
+/** Where a live adapter is dialling — CLI tools (pg_dump…) reuse the tunnel. */
+export async function getEndpoint(connectionId: string): Promise<{ host: string; port: number }> {
+  await getAdapter(connectionId);
+  return cache.get(connectionId)!.endpoint;
 }
 
 /** Returns IDs of every connection that has a live adapter in the cache.
@@ -42,11 +77,7 @@ export async function dropAdapter(connectionId: string): Promise<void> {
   const hit = cache.get(connectionId);
   if (!hit) return;
   cache.delete(connectionId);
-  try {
-    await hit.adapter.close();
-  } catch {
-    // best-effort
-  }
+  await closeEntry(hit);
 }
 
 /** Closes every pooled adapter — used on shutdown so `pnpm app:stop` (SIGTERM)
@@ -54,7 +85,22 @@ export async function dropAdapter(connectionId: string): Promise<void> {
 export async function closeAllAdapters(): Promise<void> {
   const entries = [...cache.values()];
   cache.clear();
-  await Promise.all(entries.map((e) => e.adapter.close().catch(() => undefined)));
+  await Promise.all(entries.map((e) => closeEntry(e)));
+}
+
+/** Keeps an adapter alive across the idle sweep (open transactions, schedules). */
+export function touchAdapter(connectionId: string): void {
+  const hit = cache.get(connectionId);
+  if (hit) hit.lastUsed = Date.now();
+}
+
+async function closeEntry(e: Entry): Promise<void> {
+  try {
+    await e.adapter.close();
+  } catch {
+    // best-effort
+  }
+  await e.tunnel?.close().catch(() => undefined);
 }
 
 function reapIdle(): void {
@@ -62,7 +108,7 @@ function reapIdle(): void {
   for (const [id, entry] of cache) {
     if (now - entry.lastUsed > IDLE_MS) {
       cache.delete(id);
-      void entry.adapter.close().catch(() => undefined);
+      void closeEntry(entry);
     }
   }
 }

@@ -36,6 +36,17 @@ export interface ExecuteOptions {
   signal?: AbortSignal;
   /** Transactional context if the driver supports it. */
   transactionId?: string;
+  /** Run against this database/schema instead of the connection default.
+   *  Adapters that cannot switch context per call ignore it. */
+  database?: string;
+}
+
+export interface Relation {
+  name: string;
+  fromTable: string;
+  fromColumn: string;
+  toTable: string;
+  toColumn: string;
 }
 
 export interface DbStats {
@@ -71,6 +82,15 @@ export interface DbAdapter {
   getStats(database?: string): Promise<DbStats>;
   /** Optional — adapters that don't support parameterized writes throw. */
   updateRow?(change: RowChange): Promise<{ affectedRows: number }>;
+  /** Bulk insert used by the CSV/Excel importer. */
+  insertRows?(database: string, table: string, columns: string[], rows: unknown[][]): Promise<{ inserted: number }>;
+  /** Foreign keys for the ER diagram. */
+  listRelations?(database: string): Promise<Relation[]>;
+  /** Explicit transactions: statements passing `transactionId` run on the
+   *  pinned session until commit/rollback. */
+  beginTransaction?(txId: string, database?: string): Promise<void>;
+  commitTransaction?(txId: string): Promise<void>;
+  rollbackTransaction?(txId: string): Promise<void>;
   close(): Promise<void>;
 }
 

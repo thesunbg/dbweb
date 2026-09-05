@@ -7,6 +7,7 @@ import {
   listConnections,
 } from "../store/connections.js";
 import { keyFromPassphrase } from "../store/secrets.js";
+import type { SshConfig } from "@dbweb/shared-types";
 
 const exportSchema = z.object({
   passphrase: z.string().min(8),
@@ -31,6 +32,9 @@ interface BundleEntry {
   /** Added after v1 shipped — bundles written before that simply lack it and
    *  import as ungrouped. */
   group?: string | null;
+  color?: string | null;
+  readOnly?: boolean;
+  ssh?: SshConfig | null;
   options?: Record<string, unknown>;
 }
 
@@ -66,6 +70,9 @@ export async function portabilityRoutes(app: FastifyInstance): Promise<void> {
         password: full.password,
         database: full.database,
         group: full.group,
+        color: full.color,
+        readOnly: full.readOnly,
+        ssh: full.ssh,
         options: full.options,
       });
     }
@@ -120,6 +127,9 @@ export async function portabilityRoutes(app: FastifyInstance): Promise<void> {
         password: entry.password,
         database: entry.database,
         group: entry.group ?? null,
+        color: (entry.color ?? null) as never,
+        readOnly: entry.readOnly ?? false,
+        ssh: entry.ssh ?? null,
         options: entry.options,
       });
       imported += 1;

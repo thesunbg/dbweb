@@ -55,6 +55,53 @@ function migrate(database: Database.Database): void {
   `);
 
   addColumn(database, "connections", "group_name", "TEXT");
+  addColumn(database, "connections", "color", "TEXT");
+  addColumn(database, "connections", "read_only", "INTEGER NOT NULL DEFAULT 0");
+  // Encrypted JSON blob (host/port/user/password/key) — see store/connections.ts.
+  addColumn(database, "connections", "ssh_cipher", "TEXT");
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS snippets (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      statement TEXT NOT NULL,
+      kind TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS schedules (
+      id TEXT PRIMARY KEY,
+      connection_id TEXT NOT NULL,
+      database_name TEXT,
+      name TEXT NOT NULL,
+      statement TEXT NOT NULL,
+      interval_min INTEGER NOT NULL DEFAULT 60,
+      cron TEXT,
+      condition_json TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_run_at TEXT,
+      last_status TEXT,
+      last_message TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS alerts (
+      id TEXT PRIMARY KEY,
+      schedule_id TEXT NOT NULL,
+      schedule_name TEXT NOT NULL,
+      connection_id TEXT NOT NULL,
+      message TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      read INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE CASCADE
+    );
+  `);
 }
 
 /** SQLite has no ADD COLUMN IF NOT EXISTS — check the table shape first so
