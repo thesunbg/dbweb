@@ -77,7 +77,8 @@ const SQL_KEYWORDS = [
 interface Props {
   connection: ConnectionConfig;
   connections: ConnectionConfig[];
-  onEditConnection: () => void;
+  /** Absent when connections are managed by a hosting platform. */
+  onEditConnection?: () => void;
   onOpenSettings: () => void;
 }
 
@@ -529,9 +530,11 @@ export function Workbench({ connection, connections, onEditConnection, onOpenSet
         <div className="banner error-banner">
           <strong>Cannot connect:</strong> <span>{(ping.error as Error).message}</span>
           <div className="grow" />
-          <button type="button" className="ghost" onClick={onEditConnection}>
-            Edit connection
-          </button>
+          {onEditConnection && (
+            <button type="button" className="ghost" onClick={onEditConnection}>
+              Edit connection
+            </button>
+          )}
           <button type="button" className="primary" onClick={() => void ping.refetch()}>
             Retry
           </button>
@@ -636,7 +639,7 @@ export function Workbench({ connection, connections, onEditConnection, onOpenSet
               <option value="import">↥ Import CSV / Excel</option>
               <option value="snippets">✂ Snippets</option>
               <option value="schedules">◷ Scheduled queries & alerts</option>
-              <option value="backups">⛃ Backups</option>
+              {onEditConnection && <option value="backups">⛃ Backups</option>}
               <option value="compare">⇄ Compare schema / data</option>
             </select>
           </div>

@@ -17,4 +17,13 @@ export const config = {
    * using it; scripts/dbweb.app starts it again on demand.
    */
   idleExitMinutes: Number(process.env.DBWEB_IDLE_EXIT_MIN ?? 0),
+  /**
+   * Embedded mode: dbweb runs inside a hosting platform (the paas "DB studio")
+   * behind its authenticating proxy instead of on the user's machine. The
+   * platform owns the connection list (DBWEB_CONNECTIONS) and every request
+   * must carry DBWEB_EMBED_TOKEN, which only the proxy adds. See
+   * services/embedded.ts.
+   */
+  embedded: process.env.DBWEB_EMBEDDED === "1",
+  embedToken: process.env.DBWEB_EMBED_TOKEN ?? "",
 } as const;

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ConnectionConfig } from "@dbweb/shared-types";
 import { api } from "./api.js";
@@ -14,6 +14,7 @@ import { KIND_LABEL, KIND_ORDER } from "./lib/kinds.js";
 import { readFlag, readPref, writeFlag, writePref } from "./lib/prefs.js";
 import { Modal, UiHost, confirmDialog, toast } from "./lib/ui.js";
 import { useTheme } from "./lib/theme.js";
+import { useEmbedded } from "./lib/embedded.js";
 
 export function App() {
   const qc = useQueryClient();
@@ -26,7 +27,17 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showSnippets, setShowSnippets] = useState(false);
   const [exportScope, setExportScope] = useState<{ id: string; name: string } | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(() => readPref<string | null>("selectedConnection", null));
+  const embedded = useEmbedded();
+  const [selectedId, setSelectedId] = useState<string | null>(() => {
+    // The hosting platform links to a connection with #connection=<id>.
+    const m = /^#connection=([\w-]+)$/.exec(window.location.hash);
+    if (m) {
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+      writePref("selectedConnection", m[1]);
+      return m[1] ?? null;
+    }
+    return readPref<string | null>("selectedConnection", null);
+  });
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => readFlag("sidebarCollapsed"));
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => readPref("sidebarWidth", 280));
 
@@ -77,7 +88,7 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.altKey && e.key.toLowerCase() === "n") {
+      if (mod && e.altKey && e.key.toLowerCase() === "n" && !embeddedRef.current) {
         e.preventDefault();
         setEditing(null);
         setShowForm(true);
@@ -92,6 +103,9 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const embeddedRef = useRef(embedded);
+  embeddedRef.current = embedded;
 
   const openNew = () => {
     setEditing(null);
@@ -139,23 +153,27 @@ export function App() {
             <div className="sidebar-section">
               <div className="sidebar-section-title">
                 <span>Connections{connections.data ? ` · ${connections.data.length}` : ""}</span>
-                <div className="row-tight">
-                  <button type="button" className="ghost icon-btn" onClick={() => setShowPort(true)} title="Export / Import connections">
-                    ⇅
-                  </button>
-                  <button type="button" className="primary tiny" onClick={openNew} title="New connection (⌥⌘N)">
-                    + New
-                  </button>
-                </div>
+                {!embedded && (
+                  <div className="row-tight">
+                    <button type="button" className="ghost icon-btn" onClick={() => setShowPort(true)} title="Export / Import connections">
+                      ⇅
+                    </button>
+                    <button type="button" className="primary tiny" onClick={openNew} title="New connection (⌥⌘N)">
+                      + New
+                    </button>
+                  </div>
+                )}
               </div>
               {connections.isLoading && <div className="muted hint">Loading…</div>}
               {connections.isError && <div className="error">{(connections.error as Error).message}</div>}
               {connections.data && connections.data.length === 0 && (
                 <div className="muted hint sidebar-empty">
-                  No connections yet.
-                  <button type="button" className="link" onClick={openNew}>
-                    Create the first one
-                  </button>
+                  {embedded ? "This project has no databases yet." : "No connections yet."}
+                  {!embedded && (
+                    <button type="button" className="link" onClick={openNew}>
+                      Create the first one
+                    </button>
+                  )}
                 </div>
               )}
               {connections.data && connections.data.length > 0 && (
@@ -164,6 +182,7 @@ export function App() {
                   activeIds={activeSet}
                   selectedId={selectedId}
                   onSelect={select}
+                  managed={embedded}
                   onEdit={(c) => {
                     setEditing(c);
                     setShowForm(true);
@@ -202,10 +221,14 @@ export function App() {
             connection={selected}
             connections={connections.data ?? []}
             key={selected.id}
-            onEditConnection={() => {
-              setEditing(selected);
-              setShowForm(true);
-            }}
+            onEditConnection={
+              embedded
+                ? undefined
+                : () => {
+                    setEditing(selected);
+                    setShowForm(true);
+                  }
+            }
             onOpenSettings={() => setShowSettings(true)}
           />
         ) : (
@@ -214,17 +237,23 @@ export function App() {
             <h2>{connections.data && connections.data.length > 0 ? "Pick a connection to start" : "Welcome to dbweb"}</h2>
             <p className="muted">
               {connections.data && connections.data.length > 0
-                ? "Choose one from the sidebar, or create a new one."
-                : "A local-first workbench for all your databases. Add your first connection to get going."}
+                ? embedded
+                  ? "Choose one of this project's databases from the sidebar."
+                  : "Choose one from the sidebar, or create a new one."
+                : embedded
+                  ? "Create a database in the project, then open the studio again."
+                  : "A local-first workbench for all your databases. Add your first connection to get going."}
             </p>
-            <div className="row-tight" style={{ justifyContent: "center", gap: 8 }}>
-              <button type="button" className="primary" onClick={openNew}>
-                + New connection
-              </button>
-              <button type="button" className="ghost" onClick={() => setShowPort(true)}>
-                Import bundle
-              </button>
-            </div>
+            {!embedded && (
+              <div className="row-tight" style={{ justifyContent: "center", gap: 8 }}>
+                <button type="button" className="primary" onClick={openNew}>
+                  + New connection
+                </button>
+                <button type="button" className="ghost" onClick={() => setShowPort(true)}>
+                  Import bundle
+                </button>
+              </div>
+            )}
             <div className="kind-cloud">
               {KIND_ORDER.map((k) => (
                 <span key={k} className={`kind-chip kind-${k}`}>

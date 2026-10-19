@@ -42,7 +42,7 @@ export interface ColumnInfoDto {
 }
 
 export const api = {
-  health: () => request<{ service: string; version: string; time: string }>("/api/health"),
+  health: () => request<{ service: string; version: string; time: string; embedded?: boolean }>("/api/health"),
 
   listConnections: () => request<ConnectionConfig[]>("/api/connections"),
   activeConnections: () => request<{ ids: string[] }>("/api/connections/active"),

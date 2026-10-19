@@ -203,4 +203,26 @@ Coolify quirks worth knowing:
 - Don't fold inline-edit-on-by-default for new kinds without verifying the adapter has a sane synchronous `updateRow` — ClickHouse and similar systems will give the user a broken edit affordance otherwise.
 - Don't reorder side-effect imports in `packages/adapters/src/index.ts` based on alphabet; the explicit order keeps the registration sequence visible.
 - Don't expose the master key file path to the frontend. Adapter pool reads it server-side; that's the only consumer.
-- Don't bind the server to `0.0.0.0` "for convenience". It's a deliberate local-only product — LAN exposure changes the security model and breaks the no-CORS assumption.
+- Don't bind the server to `0.0.0.0` "for convenience". It's a deliberate local-only product — LAN exposure changes the security model and breaks the no-CORS assumption. The one exception is embedded mode below, which adds its own guard.
+
+## Embedded mode (hosted DB studio)
+
+`DBWEB_EMBEDDED=1` runs dbweb inside a hosting platform (the paas "DB studio": one
+container per project, next to its databases). `Dockerfile` builds that image and
+sets it, with `DBWEB_HOST=0.0.0.0`, `DBWEB_DATA_DIR=/data`, `DBWEB_FILE_VAULT=1`.
+Everything lives in `apps/server/src/services/embedded.ts`:
+
+- **Token guard.** Every request except `GET /api/health` needs `x-dbweb-token` =
+  `DBWEB_EMBED_TOKEN` (≥ 16 chars, startup fails without it). The platform's edge
+  proxy adds it after checking the user's session; other containers on the same
+  network cannot use dbweb. CORS is not registered in this mode.
+- **Platform-owned connections.** `DBWEB_CONNECTIONS` (JSON array of
+  `ConnectionInput` + `id`) is synced at startup: created, updated (adapter dropped),
+  and anything else deleted. The platform restarts the container when it changes.
+- **Refused routes** (`BLOCKED`): create / edit / delete / duplicate / test
+  connections (arbitrary host probing from the server), backups and restore
+  (spawn dump tools, write files), portability bundles (export passwords).
+- **Web.** `/api/health` returns `embedded: true`; `lib/embedded.ts useEmbedded()`
+  hides the matching UI (New, ⇅, Edit/Duplicate/Export/Delete in `ConnMenu`, Edit
+  connection, Backups). `#connection=<id>` in the URL selects a connection (the
+  platform links straight to one).

@@ -17,6 +17,7 @@ import { scheduleRoutes } from "./routes/schedules.js";
 import { backupRoutes } from "./routes/backups.js";
 import { importRoutes } from "./routes/import.js";
 import { hasActiveSchedules, startScheduler } from "./services/scheduler.js";
+import { installEmbeddedGuard, syncEmbeddedConnections } from "./services/embedded.js";
 
 async function main() {
   const app = Fastify({
@@ -25,11 +26,14 @@ async function main() {
     bodyLimit: 256 * 1024 * 1024,
   });
 
-  await app.register(cors, { origin: true });
+  // Embedded in a platform, the browser only ever talks to dbweb through the
+  // platform's proxy on dbweb's own origin: no cross-origin access at all.
+  if (!config.embedded) await app.register(cors, { origin: true });
+  installEmbeddedGuard(app);
 
   app.get("/api/health", async () => ({
     ok: true,
-    data: { service: "dbweb", version: "0.1.0", time: new Date().toISOString() },
+    data: { service: "dbweb", version: "0.1.0", time: new Date().toISOString(), embedded: config.embedded },
   }));
 
   await connectionRoutes(app);
@@ -59,6 +63,7 @@ async function main() {
 
   // Eager-init SQLite so first request doesn't pay the migration cost.
   getDb();
+  await syncEmbeddedConnections(app.log);
 
   installIdleExit(app);
   startScheduler(app.log);

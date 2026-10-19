@@ -1,3 +1,12 @@
 packages:
   - "apps/*"
   - "packages/*"
+
+# Native modules whose install scripts must run (pnpm 10 skips unlisted ones):
+# better-sqlite3 and keytar fetch prebuilt binaries, esbuild its platform binary.
+onlyBuiltDependencies:
+  - better-sqlite3
+  - keytar
+  - esbuild
+  - cpu-features
+  - ssh2

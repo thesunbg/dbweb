@@ -83,8 +83,7 @@ export async function getConnection(id: string, withSecret = false): Promise<Con
   return rowToConfig(row, password, await fullSsh(row.ssh_cipher));
 }
 
-export async function createConnection(input: ConnectionInput): Promise<ConnectionConfig> {
-  const id = nanoid(12);
+export async function createConnection(input: ConnectionInput, id: string = nanoid(12)): Promise<ConnectionConfig> {
   const now = new Date().toISOString();
   const cipher = input.password ? await encrypt(input.password) : null;
   const sshCipher = input.ssh?.host ? await encrypt(JSON.stringify(stripSshMeta(input.ssh))) : null;
